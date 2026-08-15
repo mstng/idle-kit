@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>そだつ — 放置育成ゲームの型</title>
+    <style>
+      :root {
+        --bg: #12160f;
+        --panel: #1c2217;
+        --panel-hi: #26301e;
+        --line: #38452b;
+        --text: #e8f0df;
+        --muted: #93a385;
+        --accent: #a8d84f;
+        --accent-dim: #5d7a2a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 24px 16px 48px;
+        background: radial-gradient(circle at 50% 0%, #1e2718, var(--bg) 60%);
+        color: var(--text);
+        font-family: system-ui, -apple-system, 'Hiragino Sans', sans-serif;
+        min-height: 100vh;
+      }
+
+      main {
+        max-width: 480px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+      }
+
+      h1 {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        text-align: center;
+        margin: 0;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 20px;
+      }
+
+      /* --- 育成中の木 --- */
+      .tree {
+        text-align: center;
+      }
+
+      #stage-emoji {
+        font-size: 72px;
+        line-height: 1.2;
+        display: block;
+        /* ゆっくり揺らして「生きている」感じを出す */
+        animation: sway 4s ease-in-out infinite;
+      }
+
+      @keyframes sway {
+        0%, 100% { transform: rotate(-2deg); }
+        50% { transform: rotate(2deg); }
+      }
+
+      #stage-name {
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.1em;
+      }
+
+      .light-row {
+        margin-top: 14px;
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: 8px;
+      }
+
+      #light {
+        font-size: 34px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: var(--accent);
+      }
+
+      .light-unit {
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      #rate {
+        display: block;
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* --- 進化までの進捗 --- */
+      .progress-track {
+        margin-top: 18px;
+        height: 8px;
+        background: #0e1209;
+        border-radius: 99px;
+        overflow: hidden;
+      }
+
+      #progress-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+        border-radius: 99px;
+        transition: width 0.2s linear;
+      }
+
+      #progress-label {
+        display: block;
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      /* --- ボタン --- */
+      button {
+        font-family: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+
+      #water-button {
+        width: 100%;
+        padding: 16px;
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        background: var(--accent);
+        color: #16200a;
+        border: none;
+        border-radius: 12px;
+        transition: transform 0.08s ease;
+      }
+
+      #water-button:active {
+        transform: scale(0.97);
+      }
+
+      /* --- ショップ --- */
+      #shop {
+        display: grid;
+        gap: 8px;
+      }
+
+      .shop-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        padding: 12px 14px;
+        background: var(--panel-hi);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        text-align: left;
+      }
+
+      .shop-item:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .shop-item:not(:disabled):hover {
+        border-color: var(--accent-dim);
+      }
+
+      .shop-emoji {
+        font-size: 24px;
+      }
+
+      .shop-body {
+        flex: 1;
+        display: grid;
+        gap: 2px;
+      }
+
+      .shop-name {
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .shop-level {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 400;
+      }
+
+      .shop-effect {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .shop-cost {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* --- 転生パネル --- */
+      .prestige {
+        text-align: center;
+        border-color: #4a3a1e; /* ショップとは色味を変えて「別の層の遊び」だと示す */
+        background: #211c11;
+      }
+
+      .prestige-head {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #b09a6a;
+        letter-spacing: 0.1em;
+      }
+
+      .megumi-row {
+        margin: 10px 0 14px;
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: 6px;
+      }
+
+      #megumi {
+        font-size: 28px;
+        font-weight: 700;
+        color: #f0c869;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .megumi-unit {
+        font-size: 13px;
+        color: #b09a6a;
+      }
+
+      #megumi-multiplier {
+        margin-left: 6px;
+        font-size: 13px;
+        color: #f0c869;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #prestige-button {
+        width: 100%;
+        padding: 13px;
+        font-size: 15px;
+        font-weight: 600;
+        background: #f0c869;
+        color: #2a2007;
+        border: none;
+        border-radius: 10px;
+      }
+
+      #prestige-button:disabled {
+        background: none;
+        border: 1px dashed #4a3a1e;
+        color: #7d6c4a;
+        cursor: not-allowed;
+      }
+
+      #prestige-note {
+        display: block;
+        margin-top: 8px;
+        font-size: 11px;
+        color: #7d6c4a;
+        line-height: 1.6;
+      }
+
+      /* --- めぐみショップ --- */
+      .megumi-shop-label {
+        margin: 20px 0 10px;
+        padding-top: 16px;
+        border-top: 1px solid #3a2f18;
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        color: #b09a6a;
+        text-align: left;
+      }
+
+      #megumi-shop {
+        display: grid;
+        gap: 8px;
+      }
+
+      /* ひかりのショップと同じ骨格だが、色だけ変えて「別の通貨」だと分かるようにする */
+      .megumi-item {
+        background: #2b2314;
+        border-color: #4a3a1e;
+      }
+
+      .megumi-item:not(:disabled):hover {
+        border-color: #f0c869;
+      }
+
+      .megumi-item .shop-cost {
+        color: #f0c869;
+      }
+
+      .megumi-item .shop-effect {
+        color: #a08a5e;
+      }
+
+      /* --- おかえりなさいの通知 --- */
+      #toast {
+        position: fixed;
+        top: 0;
+        left: 50%;
+        transform: translate(-50%, -120%);
+        max-width: 440px;
+        margin: 12px;
+        padding: 12px 16px;
+        background: var(--accent);
+        color: #16200a;
+        border-radius: 12px;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.5;
+        transition: transform 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+      }
+
+      #toast.visible {
+        transform: translate(-50%, 0);
+      }
+
+      /* --- 補足 --- */
+      footer {
+        text-align: center;
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.8;
+      }
+
+      #reset-button {
+        margin-top: 8px;
+        background: none;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <main>
+      <h1>そ だ つ</h1>
+
+      <section class="panel tree">
+        <span id="stage-emoji">🌰</span>
+        <span id="stage-name">たね</span>
+
+        <div class="light-row">
+          <span id="light">0</span>
+          <span class="light-unit">ひかり</span>
+        </div>
+        <span id="rate">0 / 秒</span>
+
+        <div class="progress-track"><div id="progress-bar"></div></div>
+        <span id="progress-label"></span>
+      </section>
+
+      <button id="water-button">みずをやる</button>
+
+      <section id="shop"></section>
+
+      <section class="panel prestige">
+        <div class="prestige-head">
+          <span class="prestige-title">めぐみ</span>
+          <span id="run-count"></span>
+        </div>
+        <div class="megumi-row">
+          <span id="megumi">0</span>
+          <span class="megumi-unit">こ</span>
+          <span id="megumi-multiplier"></span>
+        </div>
+        <button id="prestige-button"></button>
+        <span id="prestige-note"></span>
+
+        <div class="megumi-shop-label">めぐみの つかいみち</div>
+        <div id="megumi-shop"></div>
+      </section>
+
+      <footer>
+        <span id="offline-note"></span>
+        <br />
+        <button id="reset-button">さいしょから</button>
+      </footer>
+    </main>
+
+    <!-- ロジックは src/game.js、画面は src/ui.js。ES モジュールなので http:// 経由で開く -->
+    <script type="module" src="./src/ui.js"></script>
+  </body>
+</html>

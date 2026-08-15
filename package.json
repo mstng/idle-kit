@@ -1,0 +1,11 @@
+{
+  "name": "idle-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "放置育成ゲームの型（参考実装）。コアロジックは純粋関数で、依存パッケージなし。",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "serve": "python3 -m http.server 8765"
+  }
+}
