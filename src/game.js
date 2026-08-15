@@ -14,6 +14,7 @@ import {
   mul,
   div,
   cmp,
+  gt,
   gte,
   lt,
   max,
@@ -102,6 +103,19 @@ export const SLEEP_EFFICIENCY_PER_LEVEL = 0.1;
 /** 「てのひら」1レベルあたり、手動の獲得量にかかる倍率 */
 export const PALM_MULTIPLIER_PER_LEVEL = 10;
 
+/**
+ * 自動購入の1回ぶんで買える上限。
+ * 8時間放置して戻ると数百回ぶんのひかりが貯まっていることがあり、
+ * 無制限に回すと復帰した瞬間に画面が固まる。ここで打ち切っても
+ * 残りは次のtick（0.1秒後）に持ち越されるので、プレイヤーの損にはならない。
+ */
+export const AUTO_BUY_MAX_PER_TICK = 50;
+
+/** 「ねむりのちから」はオフライン効率100%で頭打ちになるので、それ以上は買えないようにする */
+const SLEEP_MAX_LEVEL = Math.ceil(
+  (1 - BASE_OFFLINE_EFFICIENCY) / SLEEP_EFFICIENCY_PER_LEVEL,
+);
+
 export const MEGUMI_UPGRADES = [
   {
     id: 'sprout',
@@ -118,6 +132,7 @@ export const MEGUMI_UPGRADES = [
     emoji: '🌙',
     baseCost: 2,
     growth: 5,
+    maxLevel: SLEEP_MAX_LEVEL,
     describe: (level) =>
       `はなれているあいだの はやさ ${Math.round(offlineEfficiencyForLevel(level) * 100)}%`,
   },
@@ -128,6 +143,19 @@ export const MEGUMI_UPGRADES = [
     baseCost: 1,
     growth: 6,
     describe: (level) => `みずやり1かいで ${PALM_MULTIPLIER_PER_LEVEL ** level} もらえる`,
+  },
+  {
+    id: 'auto',
+    name: 'じどうのて',
+    emoji: '⚙️',
+    baseCost: 3,
+    growth: 8,
+    // 1レベルにつき、UPGRADES の先頭から1種類ずつ自動購入の対象になる
+    maxLevel: UPGRADES.length,
+    describe: (level) =>
+      level <= UPGRADES.length
+        ? `${UPGRADES[level - 1].name} を じどうで かう`
+        : 'すべて じどうで かう',
   },
 ];
 
@@ -196,6 +224,17 @@ export function megumiUpgradeCost(id, level) {
 
 export function currentMegumiCost(state, id) {
   return megumiUpgradeCost(id, state.megumiLevels[id] ?? 0);
+}
+
+/**
+ * これ以上買っても効果が増えないか。
+ * 上限に達したものを買えたままにすると、めぐみを無駄づかいさせてしまう。
+ * 「無意味な選択肢を消す」のもゲーム設計の仕事。
+ */
+export function isMegumiUpgradeMaxed(state, id) {
+  const def = findMegumiUpgrade(id);
+  if (!def || def.maxLevel === undefined) return false;
+  return (state.megumiLevels[id] ?? 0) >= def.maxLevel;
 }
 
 // --- めぐみアップグレードの効果 ---
@@ -282,6 +321,7 @@ export function advanceTo(state, now) {
       elapsedMs: 0,
       offline: false,
       cappedMs: 0,
+      purchases: 0,
     };
   }
 
@@ -291,12 +331,20 @@ export function advanceTo(state, now) {
   const efficiency = offline ? offlineEfficiency(state) : 1;
 
   const result = tick(state, elapsedMs, efficiency);
+
+  // 自動購入もこの入口の中で行う。別経路にすると
+  // 「放置して戻ったらひかりが大量に余っている」状態になってしまう。
+  // なお実際に放置中ずっと買い続けた場合より結果は控えめになる
+  // （本来は途中で買った分がさらに稼いでいるため）。そこは割り切っている
+  const automated = runAutoBuyer(result.state);
+
   return {
-    state: { ...result.state, lastSeenAt: now },
+    state: { ...automated.state, lastSeenAt: now },
     gained: result.gained,
     elapsedMs,
     offline,
     cappedMs: rawElapsed - elapsedMs,
+    purchases: automated.purchases,
   };
 }
 
@@ -332,6 +380,8 @@ export function buyMegumiUpgrade(state, id) {
   const def = findMegumiUpgrade(id);
   if (!def) return { state, ok: false, reason: 'unknown' };
 
+  if (isMegumiUpgradeMaxed(state, id)) return { state, ok: false, reason: 'maxed' };
+
   const cost = currentMegumiCost(state, id);
   if (lt(state.megumi, cost)) return { state, ok: false, reason: 'poor' };
 
@@ -347,6 +397,64 @@ export function buyMegumiUpgrade(state, id) {
     ok: true,
     cost,
   };
+}
+
+// --- オートバイヤー ---
+//
+// 後半になると「買えるようになった瞬間に買う」だけの作業が延々と続く。
+// それを肩代わりして、ようやく本当に放置していられるゲームになる。
+
+/** 自動購入の対象になっているアップグレードのID。じどうのて Lv.N で先頭からN種類 */
+export function automatedUpgradeIds(state) {
+  const level = state.megumiLevels?.auto ?? 0;
+  return UPGRADES.slice(0, level).map((u) => u.id);
+}
+
+/**
+ * いま買えるもののうち、最も「お得」な1つを選ぶ。
+ *
+ * 指標は 効果 ÷ コスト（1コストあたりの生産量）。
+ * 単純に安い順で買うと、効率の悪いものを延々と買い続けて成長が鈍る。
+ * 育成段階やめぐみの倍率はどのアップグレードにも等しく掛かるので、
+ * 順位を決めるだけならこの比だけ見れば足りる。
+ */
+export function bestAutoBuy(state) {
+  let best = null;
+
+  for (const id of automatedUpgradeIds(state)) {
+    const def = findUpgrade(id);
+    const cost = currentCost(state, id);
+    if (lt(state.light, cost)) continue; // いま買えないものは候補から外す
+
+    const value = div(def.effect, cost);
+    if (best === null || gt(value, best.value)) best = { id, cost, value };
+  }
+
+  return best;
+}
+
+/**
+ * 買えなくなるまで自動購入する。
+ * 回数に上限を設けているのは、長時間放置から復帰したときに
+ * 何百回ぶんの購入が1フレームに集中して画面が止まるのを防ぐため。
+ * 打ち切っても残りは次のtickで買われるので、取りこぼしにはならない。
+ */
+export function runAutoBuyer(state, maxPurchases = AUTO_BUY_MAX_PER_TICK) {
+  let current = state;
+  let purchases = 0;
+
+  for (let i = 0; i < maxPurchases; i++) {
+    const target = bestAutoBuy(current);
+    if (target === null) break;
+
+    const result = buyUpgrade(current, target.id);
+    if (!result.ok) break; // 念のため。ここに来るのは想定外なので静かに止める
+
+    current = result.state;
+    purchases += 1;
+  }
+
+  return { state: current, purchases };
 }
 
 /**

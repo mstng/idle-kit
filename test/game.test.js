@@ -14,6 +14,13 @@ import {
   MEGUMI_BONUS,
   SPROUT_SUN_PER_LEVEL,
   PALM_MULTIPLIER_PER_LEVEL,
+  AUTO_BUY_MAX_PER_TICK,
+  UPGRADES,
+  MEGUMI_UPGRADES,
+  automatedUpgradeIds,
+  bestAutoBuy,
+  runAutoBuyer,
+  isMegumiUpgradeMaxed,
   megumiMultiplier,
   megumiOnPrestige,
   canPrestige,
@@ -388,6 +395,155 @@ test('めぐみアップグレードは転生をまたいで残る', () => {
   assert.equal(num(currentMegumiCost(state, 'sleep')), 50, '続きのコストから始まる');
 });
 
+// --- オートバイヤー ---
+
+/** じどうのて を指定レベル持ち、ひかりを持った状態 */
+function autoState(autoLevel, light, levels = {}) {
+  return stateWith(levels, {
+    light,
+    megumiLevels: { sprout: 0, sleep: 0, palm: 0, auto: autoLevel },
+  });
+}
+
+test('じどうのてを持っていなければ何も買わない', () => {
+  const s = autoState(0, 1_000_000);
+  const result = runAutoBuyer(s);
+
+  assert.equal(result.purchases, 0);
+  assert.equal(result.state, s, '買っていないのに新しい状態が返っている');
+  assert.deepEqual(automatedUpgradeIds(s), []);
+});
+
+test('レベルのぶんだけ先頭から自動購入の対象になる', () => {
+  assert.deepEqual(automatedUpgradeIds(autoState(1, 0)), ['sun']);
+  assert.deepEqual(automatedUpgradeIds(autoState(2, 0)), ['sun', 'water']);
+  assert.deepEqual(automatedUpgradeIds(autoState(4, 0)), ['sun', 'water', 'soil', 'wind']);
+});
+
+test('対象外のアップグレードは、買えるお金があっても買わない', () => {
+  const s = autoState(1, 1_000_000); // おひさまだけ自動
+  const { state } = runAutoBuyer(s);
+
+  assert.ok(state.levels.sun > 0);
+  assert.equal(state.levels.water, 0, '対象外まで買ってしまっている');
+  assert.equal(state.levels.soil, 0);
+});
+
+test('安い順ではなく、効率のよいほうを選ぶ', () => {
+  // おひさま: Lv.0 でコスト10・効果0.1 → 効率 0.01
+  // みずやり: Lv.0 でコスト150・効果1.2 → 効率 0.008
+  // 一番安いのはおひさまだが、たくさん買ったあとは効率が逆転する
+  const early = autoState(2, 200);
+  assert.equal(bestAutoBuy(early).id, 'sun', '序盤はおひさまのほうが効率がよい');
+
+  // おひさまを50レベルまで上げると、1レベルあたりの効率がみずやりを下回る
+  const late = autoState(2, 1_000_000, { sun: 50 });
+  assert.equal(bestAutoBuy(late).id, 'water', '効率が逆転したら乗り換える');
+});
+
+test('買えるものがなければ選ばない', () => {
+  const broke = autoState(4, 5); // どれも買えない
+  assert.equal(bestAutoBuy(broke), null);
+  assert.equal(runAutoBuyer(broke).purchases, 0);
+});
+
+test('買えなくなるまで買い、所持量は足りている範囲に収まる', () => {
+  const s = autoState(1, 1_000);
+  const { state, purchases } = runAutoBuyer(s);
+
+  assert.ok(purchases > 0);
+  assert.ok(gte(state.light, ZERO), '所持量がマイナスになっている');
+  assert.ok(
+    lt(state.light, currentCost(state, 'sun')),
+    'まだ買えるのに止まっている',
+  );
+});
+
+test('1回の呼び出しで買う数には上限がある', () => {
+  // 上限を超える回数を買えるだけのひかりを持たせる
+  const rich = autoState(1, big({ m: 1, e: 12 }));
+  const { purchases } = runAutoBuyer(rich);
+
+  assert.equal(purchases, AUTO_BUY_MAX_PER_TICK, '上限で打ち切られていない');
+
+  // 打ち切られた分は次の呼び出しで買われる（取りこぼしにはならない）
+  const second = runAutoBuyer(runAutoBuyer(rich).state);
+  assert.ok(second.purchases > 0);
+});
+
+test('自動購入は元の状態を書き換えない', () => {
+  const s = autoState(1, 1_000);
+  runAutoBuyer(s);
+
+  assert.equal(num(s.light), 1_000);
+  assert.equal(s.levels.sun, 0);
+});
+
+test('オフラインから戻ったときも自動購入が働く', () => {
+  // 放置でひかりが貯まり、戻った時点で自動購入まで済んでいる状態を期待する
+  const s = autoState(1, 0, { sun: 10 });
+  const result = advanceTo(s, T0 + 60 * 60 * 1000); // 1時間放置
+
+  assert.equal(result.offline, true);
+  assert.ok(result.purchases > 0, '放置中に貯まったひかりが使われていない');
+  assert.ok(result.state.levels.sun > 10, 'レベルが上がっている');
+});
+
+test('自動購入があっても累計獲得量は減らない（転生の報酬に影響しない）', () => {
+  const s = autoState(1, 0, { sun: 10 });
+  const result = advanceTo(s, T0 + 60 * 60 * 1000);
+
+  // 買い物で減るのは所持量だけ。累計は稼いだぶんがそのまま残る
+  assert.equal(num(result.state.totalEarned), num(result.gained));
+  assert.ok(lt(result.state.light, result.state.totalEarned), '買い物で所持量は減っている');
+});
+
+// --- 上限のあるめぐみアップグレード ---
+
+test('効果が頭打ちになるものは、それ以上買えない', () => {
+  const sleepDef = MEGUMI_UPGRADES.find((u) => u.id === 'sleep');
+  const maxed = stateWith(
+    {},
+    {
+      megumi: 1_000_000,
+      megumiEarned: 1_000_000,
+      megumiLevels: { sprout: 0, sleep: sleepDef.maxLevel, palm: 0, auto: 0 },
+    },
+  );
+
+  assert.equal(offlineEfficiency(maxed), 1, '上限レベルで効率100%に達している');
+  assert.equal(isMegumiUpgradeMaxed(maxed, 'sleep'), true);
+
+  const result = buyMegumiUpgrade(maxed, 'sleep');
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'maxed');
+  assert.equal(result.state, maxed, 'めぐみを無駄づかいさせてしまっている');
+});
+
+test('じどうのては全種類ぶんまでしか買えない', () => {
+  const maxed = stateWith(
+    {},
+    {
+      megumi: 1_000_000,
+      megumiEarned: 1_000_000,
+      megumiLevels: { sprout: 0, sleep: 0, palm: 0, auto: UPGRADES.length },
+    },
+  );
+
+  assert.equal(isMegumiUpgradeMaxed(maxed, 'auto'), true);
+  assert.equal(buyMegumiUpgrade(maxed, 'auto').ok, false);
+});
+
+test('上限のないものは買い続けられる', () => {
+  const s = stateWith(
+    {},
+    { megumi: 1_000, megumiEarned: 1_000, megumiLevels: { sprout: 9, sleep: 0, palm: 9, auto: 0 } },
+  );
+
+  assert.equal(isMegumiUpgradeMaxed(s, 'sprout'), false);
+  assert.equal(isMegumiUpgradeMaxed(s, 'palm'), false);
+});
+
 // --- 数値のインフレ耐性 ---
 
 test('周回を重ねて桁が爆発しても計算が壊れない', () => {
@@ -436,7 +592,7 @@ test('セーブして読み込むと同じ状態に戻る', () => {
       lifetimeEarned: 5_000,
       megumi: 2,
       megumiEarned: 7,
-      megumiLevels: { sprout: 1, sleep: 0, palm: 3 },
+      megumiLevels: { sprout: 1, sleep: 0, palm: 3, auto: 0 },
       prestigeCount: 4,
     },
   );
@@ -494,7 +650,7 @@ test('v1のセーブはv3まで一気に移行され、進行が失われない'
   assert.equal(restored.levels.sun, 7, 'アップグレードが消えていない');
   assert.equal(num(restored.megumi), 0, '転生はまだ0回');
   assert.equal(num(restored.lifetimeEarned), 12_345, 'これまでの累計を引き継ぐ');
-  assert.deepEqual(restored.megumiLevels, { sprout: 0, sleep: 0, palm: 0 });
+  assert.deepEqual(restored.megumiLevels, { sprout: 0, sleep: 0, palm: 0, auto: 0 });
 });
 
 test('v2のセーブは数値がBigに変換される', () => {

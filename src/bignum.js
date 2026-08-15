@@ -15,6 +15,9 @@ const PRECISION_DIGITS = 16;
 /** 整数として正確に扱える桁数の上限（Number.MAX_SAFE_INTEGER は約9e15） */
 const SAFE_INTEGER_DIGITS = 15;
 
+/** 丸める前に信用する有効桁数。これより下の桁は浮動小数の誤差とみなして落とす */
+const TRUSTED_DIGITS = 15;
+
 /**
  * m × 10^e を表す。m は 1 <= |m| < 10 に正規化される（0 のときだけ m=0, e=0）。
  * 生成後は変更しない（イミュータブル）。計算はすべて新しい Big を返す。
@@ -182,16 +185,28 @@ function beyondIntegerPrecision(x) {
   return x.e >= SAFE_INTEGER_DIGITS;
 }
 
+/**
+ * Number に戻すときに復活する誤差を落とす。
+ * 例えば 1.92×10^2 は Number にすると 192.00000000000003 になり、
+ * そのまま切り上げると 193 になってしまう（コスト表示が1ずれる）。
+ * 信用できる桁の外側を先に丸めてから整数化する。
+ */
+function toRoundedNumber(x) {
+  const value = toNumber(x);
+  if (!Number.isFinite(value)) return value;
+  return Number(value.toPrecision(TRUSTED_DIGITS));
+}
+
 export function floor(a) {
   const x = big(a);
   if (beyondIntegerPrecision(x)) return x;
-  return big(Math.floor(toNumber(x)));
+  return big(Math.floor(toRoundedNumber(x)));
 }
 
 export function ceil(a) {
   const x = big(a);
   if (beyondIntegerPrecision(x)) return x;
-  return big(Math.ceil(toNumber(x)));
+  return big(Math.ceil(toRoundedNumber(x)));
 }
 
 /** セーブ用の素のオブジェクト。JSON.stringify は Big をそのまま {m,e} にしてくれる */

@@ -12,6 +12,8 @@ import {
   stageIndex,
   currentCost,
   currentMegumiCost,
+  isMegumiUpgradeMaxed,
+  automatedUpgradeIds,
   productionPerSecond,
   advanceTo,
   waterManually,
@@ -156,7 +158,7 @@ function createShopButton({ emoji, name, className, onClick }) {
   button.innerHTML = `
     <span class="shop-emoji">${emoji}</span>
     <span class="shop-body">
-      <span class="shop-name">${name} <span class="shop-level" data-role="level"></span></span>
+      <span class="shop-name">${name} <span class="shop-level" data-role="level"></span><span class="shop-badge" data-role="badge"></span></span>
       <span class="shop-effect" data-role="effect"></span>
     </span>
     <span class="shop-cost" data-role="cost"></span>
@@ -227,11 +229,17 @@ function render() {
     el.progressLabel.textContent = 'さいだいまで そだちました';
   }
 
+  // 自動購入されている項目には印をつける。押さなくていいものが一目でわかるように
+  const automated = new Set(automatedUpgradeIds(state));
+
   for (const upgrade of UPGRADES) {
     const button = shopButtons.get(upgrade.id);
     const cost = currentCost(state, upgrade.id);
     button.querySelector('[data-role="level"]').textContent = `Lv.${state.levels[upgrade.id]}`;
     button.querySelector('[data-role="cost"]').textContent = formatNumber(cost);
+    button.querySelector('[data-role="badge"]').textContent = automated.has(upgrade.id)
+      ? 'じどう'
+      : '';
     button.disabled = lt(state.light, cost);
   }
 
@@ -260,13 +268,17 @@ function renderPrestige() {
   for (const upgrade of MEGUMI_UPGRADES) {
     const button = megumiButtons.get(upgrade.id);
     const level = state.megumiLevels[upgrade.id];
+    const maxed = isMegumiUpgradeMaxed(state, upgrade.id);
     const cost = currentMegumiCost(state, upgrade.id);
 
     button.querySelector('[data-role="level"]').textContent = `Lv.${level}`;
+    button.querySelector('[data-role="badge"]').textContent = maxed ? 'MAX' : '';
     // 現在の効果ではなく「買ったらどうなるか」を見せる。買う判断に必要なのはそちら
-    button.querySelector('[data-role="effect"]').textContent = upgrade.describe(level + 1);
-    button.querySelector('[data-role="cost"]').textContent = formatCount(cost);
-    button.disabled = lt(state.megumi, cost);
+    button.querySelector('[data-role="effect"]').textContent = maxed
+      ? upgrade.describe(level)
+      : upgrade.describe(level + 1);
+    button.querySelector('[data-role="cost"]').textContent = maxed ? '—' : formatCount(cost);
+    button.disabled = maxed || lt(state.megumi, cost);
   }
 
   el.offlineNote.textContent = `はなれているあいだも ${Math.round(
@@ -296,10 +308,11 @@ function loop() {
   // 離席から戻ってきたときだけ、何が起きたかを伝える
   if (result.offline && result.gained.m > 0) {
     const capped = result.cappedMs > 0 ? '（上限に達しました）' : '';
+    const bought = result.purchases > 0 ? `。じどうで ${result.purchases} かい かいました` : '';
     showToast(
       `おかえりなさい。${formatDuration(result.elapsedMs)}のあいだに ${formatNumber(
         result.gained,
-      )} ひかり がたまりました${capped}`,
+      )} ひかり がたまりました${capped}${bought}`,
     );
   }
 

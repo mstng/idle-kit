@@ -205,6 +205,23 @@
         color: var(--muted);
       }
 
+      /* 「じどう」「MAX」の印。空文字のときは余白も出ないようにする */
+      .shop-badge:not(:empty) {
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 99px;
+        background: var(--accent-dim);
+        color: var(--text);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        vertical-align: 1px;
+      }
+
+      .megumi-item .shop-badge:not(:empty) {
+        background: #6b5522;
+      }
+
       .shop-cost {
         font-size: 15px;
         font-weight: 600;

@@ -157,6 +157,16 @@ test('切り捨て・切り上げ', () => {
   assert.deepEqual({ ...ceil(huge) }, { ...huge });
 });
 
+test('Numberに戻すときの誤差で丸めがずれない', () => {
+  // 3 × 8^2 は 192 ちょうど。Number にすると 192.00000000000003 になるため、
+  // 素直に切り上げると 193 になってしまう（コスト表示が1ずれる実際のバグだった）
+  assert.equal(toNumber(ceil(mul(big(3), pow(8, 2)))), 192);
+  assert.equal(toNumber(ceil(mul(big(3), pow(8, 3)))), 1_536);
+
+  // 切り捨て側も同様に、わずかに下回っているだけの値を落とさない
+  assert.equal(toNumber(floor(mul(big(2), pow(10, 3)))), 2_000);
+});
+
 test('対数で桁数がわかる', () => {
   assert.equal(Math.round(log10(big(1000))), 3);
   assert.equal(Math.round(log10(pow10(250))), 250);
