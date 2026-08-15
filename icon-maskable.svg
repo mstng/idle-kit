@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!--
+    maskable 用。OSが好きな形（円・角丸四角など）に切り抜くので、
+    図柄を中央8割に収めて、端が削られても欠けないようにしている。
+  -->
+  <rect width="512" height="512" fill="#1c2217" />
+  <g transform="translate(256 256) scale(0.78) translate(-256 -256)">
+    <circle cx="256" cy="196" r="118" fill="#a8d84f" />
+    <circle cx="178" cy="242" r="82" fill="#8cc23c" />
+    <circle cx="334" cy="242" r="82" fill="#8cc23c" />
+    <rect x="236" y="286" width="40" height="150" rx="18" fill="#6b4f2a" />
+    <path d="M256 372 q-52 -18 -74 -58 q52 -6 74 42 z" fill="#5d7a2a" />
+    <path d="M256 372 q52 -18 74 -58 q-52 -6 -74 42 z" fill="#5d7a2a" />
+  </g>
+</svg>

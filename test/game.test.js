@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ZERO, big, toNumber, gte, lt } from '../src/bignum.js';
+import { ZERO, ONE, big, toNumber, gte, lt, sub } from '../src/bignum.js';
 import {
   SCHEMA_VERSION,
   OFFLINE_CAP_MS,
@@ -16,6 +16,14 @@ import {
   SPROUT_SUN_PER_LEVEL,
   PALM_MULTIPLIER_PER_LEVEL,
   AUTO_BUY_MAX_PER_TICK,
+  LEAF_MIN_INTERVAL_MS,
+  LEAF_MAX_INTERVAL_MS,
+  LEAF_LIFETIME_MS,
+  BOOST_MULTIPLIER,
+  nextRandom,
+  isLeafAvailable,
+  isBoosted,
+  collectLeaf,
   ACHIEVEMENTS,
   ACHIEVEMENT_BONUS,
   UPGRADE_UNLOCK_RATIO,
@@ -44,6 +52,9 @@ import {
   currentStage,
   upgradeCost,
   currentCost,
+  bulkCost,
+  currentBulkCost,
+  maxAffordable,
   megumiUpgradeCost,
   currentMegumiCost,
   buyMegumiUpgrade,
@@ -407,6 +418,99 @@ test('めぐみアップグレードは転生をまたいで残る', () => {
   assert.equal(num(currentMegumiCost(state, 'sleep')), 50, '続きのコストから始まる');
 });
 
+// --- 一括購入 ---
+
+test('まとめ買いのコストは、1個ずつ買った合計とほぼ一致する', () => {
+  // 1個ずつ買っていったときの合計を求める
+  let s = stateWith({}, { light: big({ m: 1, e: 10 }) });
+  let stepwise = 0;
+  for (let i = 0; i < 10; i++) {
+    const result = buyUpgrade(s, 'sun');
+    stepwise += num(result.cost);
+    s = result.state;
+  }
+
+  const bulk = num(bulkCost('sun', 0, 10));
+
+  // 切り上げの回数が違うぶん、まとめ買いのほうがわずかに安い（差は個数未満）
+  assert.ok(bulk <= stepwise, 'まとめ買いのほうが高くなっている');
+  assert.ok(stepwise - bulk < 10, `差が大きすぎる（${stepwise - bulk}）`);
+});
+
+test('まとめ買いのコストは個数に対して急激に増える', () => {
+  assert.equal(num(bulkCost('sun', 0, 1)), num(upgradeCost('sun', 0)));
+  assert.ok(num(bulkCost('sun', 0, 10)) > num(bulkCost('sun', 0, 5)) * 2);
+  assert.equal(num(bulkCost('sun', 0, 0)), 0, '0個なら無料');
+  assert.equal(num(bulkCost('sun', 0, -5)), 0, '負の個数も0扱い');
+});
+
+test('買える数は対数で求まり、境界がずれない', () => {
+  // ちょうど10個ぶん持っている状態
+  const exact = stateWith({}, { light: bulkCost('sun', 0, 10) });
+  assert.equal(maxAffordable(exact, 'sun'), 10, 'ちょうど買える数を取りこぼしている');
+
+  // 1だけ足りない状態
+  const short = stateWith({}, { light: sub(bulkCost('sun', 0, 10), ONE) });
+  assert.equal(maxAffordable(short, 'sun'), 9, '払えない数を返している');
+
+  assert.equal(maxAffordable(stateWith({}, { light: 0 }), 'sun'), 0);
+  assert.equal(maxAffordable(stateWith({}, { light: 9 }), 'sun'), 0, '1個ぶんに足りない');
+});
+
+test('桁が大きくても一瞬で買える数が求まる', () => {
+  const rich = stateWith({}, { light: big({ m: 1, e: 300 }) });
+
+  const started = Date.now();
+  const count = maxAffordable(rich, 'sun');
+  const elapsed = Date.now() - started;
+
+  assert.ok(count > 4_000, `もっと買えるはず（${count}）`);
+  assert.ok(elapsed < 100, `時間がかかりすぎている（${elapsed}ms）`);
+
+  // 実際にその数だけ買えて、1つ多いと買えないことを確認する
+  assert.ok(gte(rich.light, currentBulkCost(rich, 'sun', count)));
+  assert.ok(lt(rich.light, currentBulkCost(rich, 'sun', count + 1)));
+});
+
+test('まとめ買いでレベルと所持量が正しく動く', () => {
+  const s = stateWith({}, { light: big({ m: 1, e: 6 }) });
+  const cost = currentBulkCost(s, 'sun', 25);
+  const { state, ok, count } = buyUpgrade(s, 'sun', 25);
+
+  assert.equal(ok, true);
+  assert.equal(count, 25);
+  assert.equal(state.levels.sun, 25);
+  assert.equal(num(state.light), num(sub(s.light, cost)));
+});
+
+test('買えるだけ買うと、所持量が次の1個に足りない状態になる', () => {
+  const s = stateWith({}, { light: 100_000 });
+  const { state, ok, count } = buyUpgrade(s, 'sun', 'max');
+
+  assert.equal(ok, true);
+  assert.ok(count > 1);
+  assert.ok(lt(state.light, currentCost(state, 'sun')), 'まだ買えるのに止まっている');
+});
+
+test('足りないときのまとめ買いは状態を変えない', () => {
+  const s = stateWith({}, { light: 100 });
+
+  const tooMany = buyUpgrade(s, 'sun', 50);
+  assert.equal(tooMany.ok, false);
+  assert.equal(tooMany.state, s);
+
+  const nothing = buyUpgrade(stateWith({}, { light: 0 }), 'sun', 'max');
+  assert.equal(nothing.ok, false);
+});
+
+test('個数を指定しなければ、これまでどおり1個買う', () => {
+  const s = stateWith({}, { light: 100 });
+  const { state, count } = buyUpgrade(s, 'sun');
+
+  assert.equal(count, 1);
+  assert.equal(state.levels.sun, 1);
+});
+
 // --- オートバイヤー ---
 
 /** じどうのて を指定レベル持ち、ひかりを持った状態 */
@@ -508,6 +612,152 @@ test('自動購入があっても累計獲得量は減らない（転生の報�
   // 買い物で減るのは所持量だけ。累計は稼いだぶんがそのまま残る
   assert.equal(num(result.state.totalEarned), num(result.gained));
   assert.ok(lt(result.state.light, result.state.totalEarned), '買い物で所持量は減っている');
+});
+
+// --- 黄金のはっぱ ---
+
+test('同じ種からは必ず同じ乱数列が出る', () => {
+  const first = [];
+  const second = [];
+  let seedA = 12_345;
+  let seedB = 12_345;
+
+  for (let i = 0; i < 5; i++) {
+    const a = nextRandom(seedA);
+    const b = nextRandom(seedB);
+    first.push(a.value);
+    second.push(b.value);
+    seedA = a.seed;
+    seedB = b.seed;
+  }
+
+  assert.deepEqual(first, second, 'リロードで結果が変わってしまう');
+  assert.ok(first.every((v) => v >= 0 && v < 1));
+  assert.ok(new Set(first).size === 5, '同じ値ばかり出ている');
+});
+
+test('はっぱの出現予定は決まった間隔の範囲に収まる', () => {
+  const s = createInitialState(T0);
+  const wait = s.nextLeafAt - T0;
+
+  assert.ok(wait >= LEAF_MIN_INTERVAL_MS);
+  assert.ok(wait <= LEAF_MAX_INTERVAL_MS);
+});
+
+test('予定の時刻を過ぎるとはっぱが出て、しばらくすると消える', () => {
+  const s = createInitialState(T0);
+  const spawnAt = s.nextLeafAt;
+
+  const before = advanceTo(s, spawnAt - 1_000);
+  assert.equal(isLeafAvailable(before.state, spawnAt - 1_000), false);
+
+  const during = advanceTo(s, spawnAt + 1_000);
+  assert.equal(isLeafAvailable(during.state, spawnAt + 1_000), true);
+
+  const after = advanceTo(s, spawnAt + LEAF_LIFETIME_MS + 1);
+  assert.equal(isLeafAvailable(after.state, spawnAt + LEAF_LIFETIME_MS + 1), false, '消えていない');
+});
+
+test('長く放置しても、出ていたはっぱは受け取れない', () => {
+  // 「その場に居合わせたことへの報酬」なので、放置ぶんはまとめてもらえない
+  const s = createInitialState(T0);
+  const result = advanceTo(s, T0 + 8 * 60 * 60 * 1000);
+
+  assert.equal(isLeafAvailable(result.state, T0 + 8 * 60 * 60 * 1000), false);
+  assert.ok(result.state.nextLeafAt > T0 + 8 * 60 * 60 * 1000, '予定が過去のままになっている');
+});
+
+test('とても長く放置しても処理が終わる', () => {
+  const s = createInitialState(T0);
+
+  const started = Date.now();
+  const result = advanceTo(s, T0 + 365 * 24 * 60 * 60 * 1000); // 1年放置
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 200, `時間がかかりすぎている（${elapsed}ms）`);
+  assert.ok(result.state.nextLeafAt > T0 + 365 * 24 * 60 * 60 * 1000);
+});
+
+test('はっぱを取るとブーストがかかる', () => {
+  const s = createInitialState(T0);
+  const spawnAt = s.nextLeafAt;
+  const present = advanceTo(s, spawnAt + 1_000).state;
+
+  const { state, ok } = collectLeaf(present, spawnAt + 1_000);
+
+  assert.equal(ok, true);
+  assert.equal(isBoosted(state, spawnAt + 1_000), true);
+  assert.equal(state.leavesCollected, 1);
+  assert.equal(isLeafAvailable(state, spawnAt + 1_000), false, '取ったのに残っている');
+});
+
+test('出ていないときに取ろうとしても何も起きない', () => {
+  const s = createInitialState(T0);
+  const { state, ok } = collectLeaf(s, T0);
+
+  assert.equal(ok, false);
+  assert.equal(state, s);
+});
+
+test('ブースト中は生産量が倍率ぶん増える', () => {
+  const base = stateWith({ sun: 10 }); // 1.0/s
+  const boosted = { ...base, boostUntil: T0 + 60_000 };
+
+  // 10秒ぶん（ブーストは切れない範囲）
+  const plain = num(advanceTo(base, T0 + 10_000).gained);
+  const withBoost = num(advanceTo(boosted, T0 + 10_000).gained);
+
+  assert.equal(withBoost, plain * BOOST_MULTIPLIER);
+});
+
+test('途中でブーストが切れる場合、区間ごとに計算される', () => {
+  const s = { ...stateWith({ sun: 10 }), boostUntil: T0 + 4_000 }; // 4秒後に切れる
+
+  // 10秒進める → 最初の4秒だけ7倍、残り6秒は等倍
+  const gained = num(advanceTo(s, T0 + 10_000).gained);
+
+  assert.equal(gained, 4 * BOOST_MULTIPLIER + 6, 'ひとつの倍率で掛けてしまっている');
+});
+
+test('切れたあとのブーストは効かない', () => {
+  const s = { ...stateWith({ sun: 10 }), boostUntil: T0 - 1_000 };
+  assert.equal(num(advanceTo(s, T0 + 10_000).gained), 10);
+});
+
+test('はっぱの進行は転生をまたいで引き継がれる', () => {
+  const s = stateWith(
+    {},
+    { totalEarned: MEGUMI_DIVISOR, leavesCollected: 7, boostUntil: T0 + 30_000 },
+  );
+  const { state } = prestige(s, T0 + 1_000);
+
+  assert.equal(state.leavesCollected, 7, '実時間の仕組みなので周回とは無関係');
+  assert.equal(state.boostUntil, T0 + 30_000, 'ブーストが打ち切られている');
+  assert.equal(state.nextLeafAt, s.nextLeafAt);
+});
+
+test('v4のセーブは、次に時間を進めたときに出現予定が組み直される', () => {
+  const v4Save = JSON.stringify({
+    version: 4,
+    light: { m: 1, e: 2 },
+    totalEarned: { m: 1, e: 2 },
+    lifetimeEarned: { m: 1, e: 2 },
+    levels: { sun: 5, water: 0, soil: 0, wind: 0 },
+    lastSeenAt: T0,
+    megumi: { m: 0, e: 0 },
+    megumiEarned: { m: 0, e: 0 },
+    megumiLevels: { sprout: 0, sleep: 0, palm: 0, auto: 0 },
+    prestigeCount: 0,
+    achievements: [],
+    longestOfflineMs: 0,
+  });
+  const restored = deserialize(v4Save, T0);
+
+  assert.equal(restored.version, SCHEMA_VERSION);
+  assert.equal(restored.nextLeafAt, 0, '移行の時点では予定なし');
+
+  const advanced = advanceTo(restored, T0 + 1_000);
+  assert.ok(advanced.state.nextLeafAt >= T0 + 1_000 + LEAF_MIN_INTERVAL_MS, '予定が組み直されていない');
 });
 
 // --- 上限のあるめぐみアップグレード ---
@@ -832,7 +1082,7 @@ test('v3のセーブは実績が空の状態で移行され、次のtickでま�
   });
   const restored = deserialize(v3Save, T0);
 
-  assert.equal(restored.version, 4);
+  assert.equal(restored.version, SCHEMA_VERSION);
   assert.deepEqual(restored.achievements, [], '移行の時点では空');
   assert.equal(restored.longestOfflineMs, 0);
 

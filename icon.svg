@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- ホーム画面に置いたときのアイコン。育てている木をそのまま図案にしている -->
+  <rect width="512" height="512" rx="112" fill="#1c2217" />
+  <circle cx="256" cy="196" r="118" fill="#a8d84f" />
+  <circle cx="178" cy="242" r="82" fill="#8cc23c" />
+  <circle cx="334" cy="242" r="82" fill="#8cc23c" />
+  <rect x="236" y="286" width="40" height="150" rx="18" fill="#6b4f2a" />
+  <path d="M256 372 q-52 -18 -74 -58 q52 -6 74 42 z" fill="#5d7a2a" />
+  <path d="M256 372 q52 -18 74 -58 q-52 -6 -74 42 z" fill="#5d7a2a" />
+</svg>

@@ -22,11 +22,12 @@ import {
   sqrt,
   floor,
   ceil,
+  log10,
   isValid,
 } from './bignum.js';
 
 /** セーブデータの形式バージョン。形を変えたら上げて、読み込み側で移行する。 */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // --- チューニング定数（マジックナンバーは全部ここに集約する） ---
 
@@ -71,6 +72,24 @@ export const UPGRADE_UNLOCK_RATIO = 0.5;
 
 /** 転生パネルが出現する条件（めぐみ1個ぶんのこの割合まで稼いだら） */
 export const PRESTIGE_UNLOCK_RATIO = 0.1;
+
+// --- 黄金のはっぱ（ランダムイベント） ---
+//
+// たまに現れ、タップすると短時間だけ生産量が跳ね上がる。
+// 放置ゲーに「いま画面を見ている理由」を与えるのがこの仕組みの役割。
+// 放置中に出たものは見逃す（＝居合わせたことへの報酬）という設計にしている。
+
+export const LEAF_MIN_INTERVAL_MS = 3 * 60 * 1000; // 出現間隔の下限
+export const LEAF_MAX_INTERVAL_MS = 8 * 60 * 1000; // 出現間隔の上限
+export const LEAF_LIFETIME_MS = 12 * 1000; // 出てから消えるまで
+export const BOOST_MULTIPLIER = 7; // ブースト中の生産量の倍率
+export const BOOST_DURATION_MS = 30 * 1000; // ブーストの持続時間
+
+/**
+ * 1回の advanceTo で処理する出現の上限。
+ * 長時間放置ぶんをまとめて進めるとき、際限なくループしないための歯止め。
+ */
+const LEAF_MAX_SPAWNS_PER_ADVANCE = 500;
 
 /**
  * 育成段階。totalEarned（累計で稼いだひかり）がしきい値を超えると進化する。
@@ -268,6 +287,13 @@ export const ACHIEVEMENTS = [
     condition: (state) => (state.longestOfflineMs ?? 0) >= OFFLINE_CAP_MS,
   },
   {
+    id: 'leaf-catcher',
+    name: 'はっぱ とり',
+    emoji: '⭐',
+    describe: () => 'こがねの はっぱを 10かい とる',
+    condition: (state) => (state.leavesCollected ?? 0) >= 10,
+  },
+  {
     id: 'astronomical',
     name: 'けたちがい',
     emoji: '🌌',
@@ -285,8 +311,39 @@ export function findMegumiUpgrade(id) {
   return MEGUMI_UPGRADES.find((u) => u.id === id);
 }
 
+/**
+ * 決定的な擬似乱数（mulberry32）を1歩進める。
+ *
+ * Math.random を使わないのは、リロードするたびに結果が変わってしまうから。
+ * 種をセーブに含めておけば「良い結果が出るまでリロードし直す」遊びが成立しなくなり、
+ * さらにテストで出現タイミングを固定して検証できる。
+ *
+ * @returns {{value:number, seed:number}} value は 0以上1未満
+ */
+export function nextRandom(seed) {
+  const a = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return { value: ((t ^ (t >>> 14)) >>> 0) / 4294967296, seed: a };
+}
+
+/** 次にはっぱが出る時刻を決める */
+function scheduleLeaf(fromMs, seed) {
+  const roll = nextRandom(seed);
+  const span = LEAF_MAX_INTERVAL_MS - LEAF_MIN_INTERVAL_MS;
+  // 時刻は整数に丸める。小数のままだとセーブして読み戻したときに一致しなくなる
+  return {
+    at: Math.round(fromMs + LEAF_MIN_INTERVAL_MS + roll.value * span),
+    seed: roll.seed,
+  };
+}
+
 /** ゲーム開始時の状態をつくる。now は呼び出し側から渡す（テストで時刻を固定できるようにするため） */
 export function createInitialState(now) {
+  // 乱数の種は端末ごとに変わってほしいので開始時刻から作る。
+  // now は外から渡されるので、テストでは固定できる
+  const firstLeaf = scheduleLeaf(now, now | 0);
+
   return {
     version: SCHEMA_VERSION,
     light: ZERO, // 現在の所持量
@@ -300,6 +357,11 @@ export function createInitialState(now) {
     lifetimeEarned: ZERO, // 全周回を通じた累計。転生しても減らない（実績や統計のため）
     achievements: [], // 達成した実績のID。転生しても消えない
     longestOfflineMs: 0, // いちばん長く離れていた時間。実績の判定に使う
+    rngSeed: firstLeaf.seed,
+    nextLeafAt: firstLeaf.at, // 次にはっぱが出る時刻
+    leafExpiresAt: 0, // いま出ているはっぱが消える時刻（0なら出ていない）
+    boostUntil: 0, // ブーストが切れる時刻
+    leavesCollected: 0, // これまでに取ったはっぱの数
   };
 }
 
@@ -332,6 +394,59 @@ export function upgradeCost(id, level) {
 /** そのアップグレードの現在の購入コスト */
 export function currentCost(state, id) {
   return upgradeCost(id, state.levels[id] ?? 0);
+}
+
+/**
+ * レベル fromLevel から count 個ぶん、まとめて買うときのコスト。
+ *
+ * 1個ずつの値段を count 回足すループにすると、レベルが数万になった時点で
+ * 画面が固まる。等比数列の和の公式で一発で求める：
+ *
+ *   base × g^from × (g^count − 1) / (g − 1)
+ *
+ * なお1個ずつ買った場合の合計とは、切り上げの回数の違いでごくわずかにずれる
+ * （まとめ買いのほうが最大で count 未満だけ安い）。実用上は無視できる差なので、
+ * まとめ買いのささやかな利点として許容している。
+ */
+export function bulkCost(id, fromLevel, count) {
+  const def = findUpgrade(id);
+  if (!def) throw new Error(`未知のアップグレードID: ${id}`);
+  if (!Number.isFinite(count) || count <= 0) return ZERO;
+
+  const head = mul(def.baseCost, pow(def.growth, fromLevel));
+  const factor = div(sub(pow(def.growth, count), ONE), def.growth - 1);
+  return ceil(mul(head, factor));
+}
+
+/** いまのレベルから count 個ぶん買うときのコスト */
+export function currentBulkCost(state, id, count) {
+  return bulkCost(id, state.levels[id] ?? 0, count);
+}
+
+/**
+ * いまの所持量で何レベルぶん買えるか。
+ *
+ * まとめ買いのコストの式を count について解くと、対数で一発で求まる：
+ *
+ *   count = log_g( light × (g − 1) / (base × g^from) + 1 )
+ *
+ * 1個ずつ「買えるか？」を試すループだと、1万レベル買える場面で1万回まわる。
+ * 対数なら所持量がどれだけ大きくても一定時間で答えが出る。
+ */
+export function maxAffordable(state, id) {
+  const def = findUpgrade(id);
+  if (!def) return 0;
+
+  const head = mul(def.baseCost, pow(def.growth, state.levels[id] ?? 0));
+  if (lt(state.light, head)) return 0; // 1個も買えない
+
+  const inner = add(div(mul(state.light, def.growth - 1), head), ONE);
+  let count = Math.floor(log10(inner) / Math.log10(def.growth));
+
+  // 対数の丸め誤差で1〜2多く見積もることがあるので、実際に払える数まで下げる。
+  // ずれても数回で収まるため、ここのループはコストにならない
+  while (count > 0 && lt(state.light, currentBulkCost(state, id, count))) count -= 1;
+  return count;
 }
 
 /** めぐみアップグレードの購入コスト */
@@ -470,6 +585,88 @@ export function productionPerSecond(state) {
   );
 }
 
+// --- 黄金のはっぱ ---
+
+/** いま画面にはっぱが出ているか */
+export function isLeafAvailable(state, now) {
+  return now < (state.leafExpiresAt ?? 0);
+}
+
+/** いまブーストが効いているか */
+export function isBoosted(state, now) {
+  return now < (state.boostUntil ?? 0);
+}
+
+/** ブーストの残り時間（ミリ秒） */
+export function boostRemainingMs(state, now) {
+  return Math.max(0, (state.boostUntil ?? 0) - now);
+}
+
+/**
+ * 出現の予定を now まで進める。
+ * 放置している間に出たはっぱは、消える時刻も過ぎているので受け取れない。
+ * これは意図した仕様で、「その場に居合わせたこと」への報酬にしている。
+ */
+function advanceLeaves(state, now) {
+  let seed = state.rngSeed;
+  let nextLeafAt = state.nextLeafAt;
+  let leafExpiresAt = state.leafExpiresAt ?? 0;
+
+  // 予定が入っていない（移行直後など）ときは、いまを起点に組み直す
+  if (!nextLeafAt) {
+    const scheduled = scheduleLeaf(now, seed);
+    return { ...state, rngSeed: scheduled.seed, nextLeafAt: scheduled.at };
+  }
+
+  let spawns = 0;
+  while (nextLeafAt <= now && spawns < LEAF_MAX_SPAWNS_PER_ADVANCE) {
+    leafExpiresAt = nextLeafAt + LEAF_LIFETIME_MS;
+    const scheduled = scheduleLeaf(nextLeafAt, seed);
+    nextLeafAt = scheduled.at;
+    seed = scheduled.seed;
+    spawns += 1;
+  }
+
+  // 上限で打ち切った場合は追いつけていないので、いまを起点に組み直す
+  if (nextLeafAt <= now) {
+    const scheduled = scheduleLeaf(now, seed);
+    nextLeafAt = scheduled.at;
+    seed = scheduled.seed;
+  }
+
+  return { ...state, rngSeed: seed, nextLeafAt, leafExpiresAt };
+}
+
+/**
+ * はっぱを取る。出ていなければ何も起きない。
+ * すでにブースト中でも、単純に「いまから30秒」で上書きする（延長ではない）。
+ */
+export function collectLeaf(state, now) {
+  if (!isLeafAvailable(state, now)) return { state, ok: false };
+
+  return {
+    state: {
+      ...state,
+      leafExpiresAt: 0,
+      boostUntil: now + BOOST_DURATION_MS,
+      leavesCollected: (state.leavesCollected ?? 0) + 1,
+    },
+    ok: true,
+  };
+}
+
+/**
+ * 経過した時間のうち、ブーストが効いていた分を重みづけして「実効の時間」にする。
+ *
+ * ブーストは途中で切れるので、経過時間をひとつの倍率で掛けると必ずずれる。
+ * 区間を「ブースト中」と「ブースト外」に分けて、それぞれの重みで足し合わせる。
+ */
+function weightedElapsedMs(state, windowStart, elapsedMs) {
+  const boostEnd = Math.min(state.boostUntil ?? 0, windowStart + elapsedMs);
+  const boostedMs = Math.min(elapsedMs, Math.max(0, boostEnd - windowStart));
+  return boostedMs * BOOST_MULTIPLIER + (elapsedMs - boostedMs);
+}
+
 /**
  * 経過時間ぶんだけ状態を進める（このゲームの心臓部）。
  * ポイントは「フレーム数」ではなく「経過ミリ秒」で計算すること。
@@ -522,7 +719,9 @@ export function advanceTo(state, now) {
   const elapsedMs = offline ? Math.min(rawElapsed, OFFLINE_CAP_MS) : rawElapsed;
   const efficiency = offline ? offlineEfficiency(state) : 1;
 
-  const result = tick(state, elapsedMs, efficiency);
+  // ブーストが効いていた時間を重みづけしてから進める
+  const windowStart = now - elapsedMs;
+  const result = tick(state, weightedElapsedMs(state, windowStart, elapsedMs), efficiency);
 
   // 自動購入もこの入口の中で行う。別経路にすると
   // 「放置して戻ったらひかりが大量に余っている」状態になってしまう。
@@ -532,12 +731,17 @@ export function advanceTo(state, now) {
 
   // 実績の判定は最後。自動購入まで済ませた状態で見ないと
   // 「4種類そろえた」のような条件が1tick遅れて達成されてしまう
-  const achieved = checkAchievements({
-    ...automated.state,
-    longestOfflineMs: offline
-      ? Math.max(state.longestOfflineMs ?? 0, elapsedMs)
-      : (state.longestOfflineMs ?? 0),
-  });
+  const achieved = checkAchievements(
+    advanceLeaves(
+      {
+        ...automated.state,
+        longestOfflineMs: offline
+          ? Math.max(state.longestOfflineMs ?? 0, elapsedMs)
+          : (state.longestOfflineMs ?? 0),
+      },
+      now,
+    ),
+  );
 
   return {
     state: { ...achieved.state, lastSeenAt: now },
@@ -559,21 +763,28 @@ export function waterManually(state) {
  * アップグレードを買う。買えないときは状態を変えずに ok:false を返す。
  * 「失敗しても壊れない」ことを呼び出し側が気にしなくて済むようにしている。
  */
-export function buyUpgrade(state, id) {
+export function buyUpgrade(state, id, count = 1) {
   const def = findUpgrade(id);
   if (!def) return { state, ok: false, reason: 'unknown' };
 
-  const cost = currentCost(state, id);
+  // 'max' を渡すと、いま買えるだけ買う
+  const amount = count === 'max' ? maxAffordable(state, id) : count;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { state, ok: false, reason: count === 'max' ? 'poor' : 'invalid' };
+  }
+
+  const cost = currentBulkCost(state, id, amount);
   if (lt(state.light, cost)) return { state, ok: false, reason: 'poor' };
 
   return {
     state: {
       ...state,
       light: sub(state.light, cost),
-      levels: { ...state.levels, [id]: (state.levels[id] ?? 0) + 1 },
+      levels: { ...state.levels, [id]: (state.levels[id] ?? 0) + amount },
     },
     ok: true,
     cost,
+    count: amount,
   };
 }
 
@@ -704,6 +915,12 @@ export function prestige(state, now) {
       // 実績と記録は周回をまたいで残す。ここを消すと集める意味がなくなる
       achievements: [...(state.achievements ?? [])],
       longestOfflineMs: state.longestOfflineMs ?? 0,
+      // はっぱは実時間の仕組みなので、周回とは無関係に進み続ける
+      rngSeed: state.rngSeed,
+      nextLeafAt: state.nextLeafAt,
+      leafExpiresAt: state.leafExpiresAt ?? 0,
+      boostUntil: state.boostUntil ?? 0,
+      leavesCollected: state.leavesCollected ?? 0,
     },
     ok: true,
     gained,
@@ -754,6 +971,19 @@ const MIGRATIONS = {
     version: 4,
     achievements: [],
     longestOfflineMs: 0,
+  }),
+
+  // v4 → v5: 黄金のはっぱを追加した。
+  // nextLeafAt を 0 にしておくと、次に時間を進めるときに「いま」を起点に組み直される。
+  // ここで具体的な時刻を入れないのは、移行処理が現在時刻を知らないため
+  4: (data) => ({
+    ...data,
+    version: 5,
+    rngSeed: (data.lastSeenAt ?? 0) | 0,
+    nextLeafAt: 0,
+    leafExpiresAt: 0,
+    boostUntil: 0,
+    leavesCollected: 0,
   }),
 };
 
@@ -823,5 +1053,10 @@ export function deserialize(text, now) {
       Array.isArray(migrated.achievements) ? migrated.achievements.includes(id) : false,
     ),
     longestOfflineMs: level(migrated.longestOfflineMs),
+    rngSeed: Number.isFinite(migrated.rngSeed) ? migrated.rngSeed | 0 : now | 0,
+    nextLeafAt: level(migrated.nextLeafAt),
+    leafExpiresAt: level(migrated.leafExpiresAt),
+    boostUntil: level(migrated.boostUntil),
+    leavesCollected: level(migrated.leavesCollected),
   };
 }

@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "serve": "node tools/serve.js"
+    "serve": "node tools/serve.js",
+    "simulate": "node tools/simulate.js"
   }
 }

@@ -1,7 +1,8 @@
 // UI層。ここは「ゲームループ・保存・描画」の3つだけを担当し、ゲームのルールは一切書かない。
 // ルールはすべて game.js（純粋関数）側にあるので、UIを作り替えてもゲームは壊れない。
 
-import { ONE, add, big, div, lt, pow10, toNumber } from './bignum.js';
+import { ONE, add, lt, mul, toNumber } from './bignum.js';
+import { formatNumber, formatCount, formatDuration } from './format.js';
 import {
   UPGRADES,
   MEGUMI_UPGRADES,
@@ -13,11 +14,18 @@ import {
   isUpgradeUnlocked,
   isPrestigeUnlocked,
   isMegumiShopUnlocked,
+  isLeafAvailable,
+  isBoosted,
+  boostRemainingMs,
+  collectLeaf,
+  BOOST_MULTIPLIER,
   createInitialState,
   currentStage,
   nextStage,
   stageIndex,
   currentCost,
+  currentBulkCost,
+  maxAffordable,
   currentMegumiCost,
   isMegumiUpgradeMaxed,
   automatedUpgradeIds,
@@ -45,19 +53,11 @@ const LEGACY_SAVE_KEYS = ['idle-kit:save:v1']; // 昔のキーで保存された
 const TICK_INTERVAL_MS = 100; // 画面更新の間隔。計算は実時間ベースなので、この値を変えても進行速度は変わらない
 const AUTOSAVE_INTERVAL_MS = 5_000;
 
-/** 日本語の桁の単位。これを超えたら指数表記に切り替える */
-const JA_UNITS = [
-  { exponent: 20, suffix: '垓' },
-  { exponent: 16, suffix: '京' },
-  { exponent: 12, suffix: '兆' },
-  { exponent: 8, suffix: '億' },
-  { exponent: 4, suffix: '万' },
-];
-const SCIENTIFIC_FROM_EXPONENT = 24; // 垓を超えたら「1.23×10^30」形式にする
-
 // --- 状態（このモジュールだけが持つ可変の変数） ---
 let state = createInitialState(Date.now());
 let lastSavedAt = 0;
+// 「いくつ買うか」は見た目の設定であってゲームの状態ではないので、セーブには含めない
+let bulkAmount = 1;
 
 // --- 保存と読み込み ---
 
@@ -85,53 +85,6 @@ function saveState() {
   }
 }
 
-// --- 表示のための整形 ---
-
-/**
- * 巨大数を読みやすい文字列にする。
- * 桁が増えるほど情報を粗くしていく（1.8万 → 3.2京 → 1.23×10^45）。
- * 放置ゲーでは正確な桁より「どのくらいの規模か」が伝わることが大事。
- */
-function formatNumber(value) {
-  const amount = big(value);
-  if (amount.m === 0) return '0';
-  if (amount.m < 0) return `-${formatNumber({ m: -amount.m, e: amount.e })}`;
-
-  // 垓を超えたら指数表記。ここまで来ると単位を足しても読めない
-  if (amount.e >= SCIENTIFIC_FROM_EXPONENT) {
-    return `${amount.m.toFixed(2)}×10^${amount.e}`;
-  }
-
-  for (const unit of JA_UNITS) {
-    if (amount.e >= unit.exponent) {
-      const scaled = toNumber(div(amount, pow10(unit.exponent)));
-      return `${scaled.toFixed(1)}${unit.suffix}`;
-    }
-  }
-
-  const plain = toNumber(amount);
-  // 小さいうちは小数第1位まで見せて「増えている感」を出す
-  return plain < 100 ? plain.toFixed(1) : Math.floor(plain).toLocaleString('ja-JP');
-}
-
-/** 個数など、小数にならない値の表記。ひかり（連続値）とは書式を分ける */
-function formatCount(value) {
-  const amount = big(value);
-  if (amount.m === 0) return '0';
-  if (amount.e >= 15) return formatNumber(amount); // 数えられる範囲を超えたら通常表記に任せる
-  return Math.floor(toNumber(amount)).toLocaleString('ja-JP');
-}
-
-/** ミリ秒を「2時間30分」のような表記にする */
-function formatDuration(ms) {
-  const totalMinutes = Math.floor(ms / 60_000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours > 0) return `${hours}時間${minutes}分`;
-  if (minutes > 0) return `${minutes}分`;
-  return `${Math.floor(ms / 1000)}秒`;
-}
-
 // --- DOM の組み立て ---
 
 const el = {
@@ -153,6 +106,7 @@ const el = {
   achievementList: document.querySelector('#achievement-list'),
   prestigeButton: document.querySelector('#prestige-button'),
   prestigeNote: document.querySelector('#prestige-note'),
+  leaf: document.querySelector('#leaf'),
   resetButton: document.querySelector('#reset-button'),
   offlineNote: document.querySelector('#offline-note'),
   toast: document.querySelector('#toast'),
@@ -186,7 +140,7 @@ function buildShops() {
       name: upgrade.name,
       className: 'shop-item',
       onClick: () => {
-        const result = buyUpgrade(state, upgrade.id);
+        const result = buyUpgrade(state, upgrade.id, bulkAmount);
         if (!result.ok) return; // 買えないときは何も起きない（ルール判定はgame.js側の責務）
         state = result.state;
         saveState();
@@ -237,8 +191,20 @@ function render() {
 
   el.stageEmoji.textContent = stage.emoji;
   el.stageName.textContent = stage.name;
+  const now = Date.now();
   el.light.textContent = formatNumber(state.light);
-  el.rate.textContent = `${formatNumber(productionPerSecond(state))} / 秒`;
+
+  // ブースト中は、実際に効いている速さ（倍率をかけた値）を見せる
+  const boosted = isBoosted(state, now);
+  const rate = productionPerSecond(state);
+  el.rate.classList.toggle('boosted', boosted);
+  el.rate.textContent = boosted
+    ? `${formatNumber(mul(rate, BOOST_MULTIPLIER))} / 秒　×${BOOST_MULTIPLIER} のこり ${Math.ceil(
+        boostRemainingMs(state, now) / 1000,
+      )}秒`
+    : `${formatNumber(rate)} / 秒`;
+
+  el.leaf.hidden = !isLeafAvailable(state, now);
   el.waterButton.textContent = `みずをやる (+${formatCount(manualGain(state))})`;
 
   // 次の進化までの進捗。最終段階に達していたら満タン表示にする
@@ -265,13 +231,18 @@ function render() {
     button.hidden = !isUpgradeUnlocked(state, upgrade.id);
     if (button.hidden) continue;
 
-    const cost = currentCost(state, upgrade.id);
-    button.querySelector('[data-role="level"]').textContent = `Lv.${state.levels[upgrade.id]}`;
+    // 「かえるだけ」のときは、いま何個買えるかを毎回計算して見せる
+    const count = bulkAmount === 'max' ? maxAffordable(state, upgrade.id) : bulkAmount;
+    const cost = count > 0 ? currentBulkCost(state, upgrade.id, count) : currentCost(state, upgrade.id);
+    const level = state.levels[upgrade.id];
+
+    button.querySelector('[data-role="level"]').textContent =
+      count > 1 ? `Lv.${level} → ${level + count}` : `Lv.${level}`;
     button.querySelector('[data-role="cost"]').textContent = formatNumber(cost);
     button.querySelector('[data-role="badge"]').textContent = automated.has(upgrade.id)
       ? 'じどう'
       : '';
-    button.disabled = lt(state.light, cost);
+    button.disabled = count <= 0 || lt(state.light, cost);
   }
 
   renderPrestige();
@@ -389,9 +360,31 @@ function start() {
   state = loadState();
   buildShops();
 
+  // かう かずの きりかえ
+  for (const button of document.querySelectorAll('#bulk-switch button')) {
+    const value = button.dataset.amount;
+    button.addEventListener('click', () => {
+      bulkAmount = value === 'max' ? 'max' : Number(value);
+      for (const other of document.querySelectorAll('#bulk-switch button')) {
+        other.setAttribute('aria-pressed', String(other === button));
+      }
+      render();
+    });
+    button.setAttribute('aria-pressed', String(value === '1'));
+  }
+
   el.waterButton.addEventListener('click', () => {
     state = waterManually(state);
     render();
+  });
+
+  el.leaf.addEventListener('click', () => {
+    const result = collectLeaf(state, Date.now());
+    if (!result.ok) return;
+    state = result.state;
+    saveState();
+    render();
+    showToast(`🍀 こがねの はっぱ！ ${BOOST_MULTIPLIER}ばいの はやさが 30びょう つづきます`);
   });
 
   el.prestigeButton.addEventListener('click', () => {
@@ -430,6 +423,20 @@ function start() {
 
   loop(); // 起動直後に1回走らせて、オフライン進行を反映する
   setInterval(loop, TICK_INTERVAL_MS);
+
+  registerServiceWorker();
+}
+
+/**
+ * オフラインでも起動できるようにする。
+ * 登録に失敗してもゲーム自体は動くので、失敗は警告に留めて先へ進む。
+ */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+
+  navigator.serviceWorker
+    .register('./sw.js')
+    .catch((error) => console.warn('オフライン対応の登録に失敗しました', error));
 }
 
 start();

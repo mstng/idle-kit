@@ -2,7 +2,15 @@
 <html lang="ja">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover と safe-area で、ノッチのある端末でも端まで自然に見せる -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#12160f" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="そだつ" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
     <title>そだつ — 放置育成ゲームの型</title>
     <style>
       :root {
@@ -31,7 +39,7 @@
 
       body {
         margin: 0;
-        padding: 24px 16px 48px;
+        padding: calc(24px + env(safe-area-inset-top)) 16px calc(48px + env(safe-area-inset-bottom));
         background: radial-gradient(circle at 50% 0%, #1e2718, var(--bg) 60%);
         color: var(--text);
         font-family: system-ui, -apple-system, 'Hiragino Sans', sans-serif;
@@ -113,6 +121,34 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* ブースト中は生産量の表示そのものを光らせて、効いていることを一目で伝える */
+      #rate.boosted {
+        color: #f0c869;
+        font-weight: 700;
+      }
+
+      /* --- こがねの はっぱ --- */
+      #leaf {
+        position: fixed;
+        right: 20px;
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        width: 64px;
+        height: 64px;
+        font-size: 34px;
+        line-height: 1;
+        background: radial-gradient(circle at 40% 35%, #ffe9a8, #e0b53f);
+        border: none;
+        border-radius: 50%;
+        box-shadow: 0 0 24px rgba(240, 200, 105, 0.55);
+        animation: leaf-pulse 1.1s ease-in-out infinite;
+        z-index: 10;
+      }
+
+      @keyframes leaf-pulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.12); }
+      }
+
       /* --- 進化までの進捗 --- */
       .progress-track {
         margin-top: 18px;
@@ -146,7 +182,12 @@
 
       #water-button {
         width: 100%;
-        padding: 16px;
+        /* 指で連打するボタンなので、モバイルの推奨タップ領域（44px）を大きく超える高さにする */
+        padding: 20px;
+        /* 連打したときに文字が選択されたり、二重タップで拡大されるのを防ぐ */
+        -webkit-user-select: none;
+        user-select: none;
+        touch-action: manipulation;
         font-size: 17px;
         font-weight: 600;
         letter-spacing: 0.05em;
@@ -159,6 +200,30 @@
 
       #water-button:active {
         transform: scale(0.97);
+      }
+
+      /* --- かう かずの きりかえ --- */
+      .bulk-switch {
+        display: flex;
+        gap: 6px;
+        justify-content: center;
+      }
+
+      .bulk-switch button {
+        flex: 1;
+        padding: 7px 0;
+        font-size: 12px;
+        font-weight: 600;
+        background: none;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+      }
+
+      .bulk-switch button[aria-pressed='true'] {
+        background: var(--panel-hi);
+        border-color: var(--accent-dim);
+        color: var(--accent);
       }
 
       /* --- ショップ --- */
@@ -449,6 +514,7 @@
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite"></div>
+    <button id="leaf" type="button" hidden aria-label="こがねの はっぱを とる">🍀</button>
 
     <main>
       <h1>そ だ つ</h1>
@@ -468,6 +534,12 @@
       </section>
 
       <button id="water-button">みずをやる</button>
+
+      <div class="bulk-switch" id="bulk-switch" role="group" aria-label="かう かず">
+        <button type="button" data-amount="1">×1</button>
+        <button type="button" data-amount="10">×10</button>
+        <button type="button" data-amount="max">かえるだけ</button>
+      </div>
 
       <section id="shop"></section>
 
