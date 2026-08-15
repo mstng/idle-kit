@@ -5,7 +5,14 @@ import { ONE, add, big, div, lt, pow10, toNumber } from './bignum.js';
 import {
   UPGRADES,
   MEGUMI_UPGRADES,
+  ACHIEVEMENTS,
   STAGES,
+  isAchieved,
+  achievementCount,
+  achievementMultiplier,
+  isUpgradeUnlocked,
+  isPrestigeUnlocked,
+  isMegumiShopUnlocked,
   createInitialState,
   currentStage,
   nextStage,
@@ -140,6 +147,10 @@ const el = {
   megumiMultiplier: document.querySelector('#megumi-multiplier'),
   megumiShop: document.querySelector('#megumi-shop'),
   runCount: document.querySelector('#run-count'),
+  prestigePanel: document.querySelector('#prestige-panel'),
+  megumiShopLabel: document.querySelector('#megumi-shop-label'),
+  achievementCount: document.querySelector('#achievement-count'),
+  achievementList: document.querySelector('#achievement-list'),
   prestigeButton: document.querySelector('#prestige-button'),
   prestigeNote: document.querySelector('#prestige-note'),
   resetButton: document.querySelector('#reset-button'),
@@ -150,6 +161,7 @@ const el = {
 /** 買い物ボタンは起動時に1度だけ作り、以降は中身のテキストだけ書き換える */
 const shopButtons = new Map();
 const megumiButtons = new Map();
+const achievementRows = new Map();
 
 /** 共通の買い物ボタンをつくる。ひかりショップとめぐみショップで見た目の骨格は同じ */
 function createShopButton({ emoji, name, className, onClick }) {
@@ -202,6 +214,20 @@ function buildShops() {
     megumiButtons.set(upgrade.id, button);
     el.megumiShop.append(button);
   }
+
+  for (const achievement of ACHIEVEMENTS) {
+    const row = document.createElement('div');
+    row.className = 'achievement';
+    row.innerHTML = `
+      <span class="achievement-emoji">${achievement.emoji}</span>
+      <span class="achievement-body">
+        <span class="achievement-name">${achievement.name}</span>
+        <span class="achievement-desc">${achievement.describe()}</span>
+      </span>
+    `;
+    achievementRows.set(achievement.id, row);
+    el.achievementList.append(row);
+  }
 }
 
 /** 画面全体を現在の状態から描き直す */
@@ -234,6 +260,11 @@ function render() {
 
   for (const upgrade of UPGRADES) {
     const button = shopButtons.get(upgrade.id);
+
+    // まだ手の届かないものは並べない。選択肢が多いほど迷うだけで、次の一手は伝わらない
+    button.hidden = !isUpgradeUnlocked(state, upgrade.id);
+    if (button.hidden) continue;
+
     const cost = currentCost(state, upgrade.id);
     button.querySelector('[data-role="level"]').textContent = `Lv.${state.levels[upgrade.id]}`;
     button.querySelector('[data-role="cost"]').textContent = formatNumber(cost);
@@ -244,10 +275,28 @@ function render() {
   }
 
   renderPrestige();
+  renderAchievements();
+}
+
+/** 実績パネル。未達成のものも条件つきで見せることで、次の目標として機能させる */
+function renderAchievements() {
+  el.achievementCount.textContent = `${achievementCount(state)} / ${ACHIEVEMENTS.length}`;
+
+  for (const achievement of ACHIEVEMENTS) {
+    const row = achievementRows.get(achievement.id);
+    row.classList.toggle('locked', !isAchieved(state, achievement.id));
+  }
 }
 
 /** 転生パネルの描画。到達していなくても「あといくら」を常に見せて目標にする */
 function renderPrestige() {
+  // 転生もめぐみショップも、意味を持つ段階になってから見せる
+  el.prestigePanel.hidden = !isPrestigeUnlocked(state);
+  if (el.prestigePanel.hidden) return;
+
+  const megumiShopVisible = isMegumiShopUnlocked(state);
+  el.megumiShopLabel.hidden = !megumiShopVisible;
+
   const gain = megumiOnPrestige(state);
   const ready = canPrestige(state);
 
@@ -267,6 +316,9 @@ function renderPrestige() {
 
   for (const upgrade of MEGUMI_UPGRADES) {
     const button = megumiButtons.get(upgrade.id);
+    button.hidden = !megumiShopVisible;
+    if (button.hidden) continue;
+
     const level = state.megumiLevels[upgrade.id];
     const maxed = isMegumiUpgradeMaxed(state, upgrade.id);
     const cost = currentMegumiCost(state, upgrade.id);
@@ -313,6 +365,17 @@ function loop() {
       `おかえりなさい。${formatDuration(result.elapsedMs)}のあいだに ${formatNumber(
         result.gained,
       )} ひかり がたまりました${capped}${bought}`,
+    );
+  }
+
+  // 実績の通知はオフライン復帰の通知より後に出す。
+  // 復帰直後はまとめて達成されることがあるので、件数だけ伝えて画面を埋めない
+  if (result.newlyEarned.length === 1) {
+    const [earned] = result.newlyEarned;
+    showToast(`${earned.emoji} 「${earned.name}」を たっせい！ せいさんりょうが ふえました`);
+  } else if (result.newlyEarned.length > 1) {
+    showToast(
+      `${result.newlyEarned.map((a) => a.emoji).join('')} ${result.newlyEarned.length}つ たっせい！ せいさんりょうが ふえました`,
     );
   }
 

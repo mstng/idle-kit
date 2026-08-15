@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import { ZERO, big, toNumber, gte, lt } from '../src/bignum.js';
 import {
+  SCHEMA_VERSION,
   OFFLINE_CAP_MS,
   BASE_OFFLINE_EFFICIENCY,
   OFFLINE_THRESHOLD_MS,
@@ -15,6 +16,17 @@ import {
   SPROUT_SUN_PER_LEVEL,
   PALM_MULTIPLIER_PER_LEVEL,
   AUTO_BUY_MAX_PER_TICK,
+  ACHIEVEMENTS,
+  ACHIEVEMENT_BONUS,
+  UPGRADE_UNLOCK_RATIO,
+  isAchieved,
+  achievementCount,
+  achievementMultiplier,
+  checkAchievements,
+  isUpgradeUnlocked,
+  unlockedUpgrades,
+  isPrestigeUnlocked,
+  isMegumiShopUnlocked,
   UPGRADES,
   MEGUMI_UPGRADES,
   automatedUpgradeIds,
@@ -544,6 +556,158 @@ test('上限のないものは買い続けられる', () => {
   assert.equal(isMegumiUpgradeMaxed(s, 'palm'), false);
 });
 
+// --- 実績 ---
+
+test('実績のIDは重複していない', () => {
+  const ids = ACHIEVEMENTS.map((a) => a.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test('条件を満たした実績が記録される', () => {
+  const s = stateWith({}, { lifetimeEarned: 1 });
+  const { state, newlyEarned } = checkAchievements(s);
+
+  assert.ok(newlyEarned.some((a) => a.id === 'first-drop'));
+  assert.equal(isAchieved(state, 'first-drop'), true);
+});
+
+test('何も達成していなければ状態は変わらない', () => {
+  const s = createInitialState(T0);
+  const { state, newlyEarned } = checkAchievements(s);
+
+  assert.deepEqual(newlyEarned, []);
+  assert.equal(state, s, '達成していないのに新しい状態が返っている');
+});
+
+test('同じ実績は二重に記録されない', () => {
+  const s = stateWith({}, { lifetimeEarned: 1 });
+  const once = checkAchievements(s).state;
+  const twice = checkAchievements(once);
+
+  assert.deepEqual(twice.newlyEarned, []);
+  assert.equal(twice.state, once);
+  assert.equal(achievementCount(once), 1);
+});
+
+test('条件が偽に戻っても実績は外れない', () => {
+  // 「おひさま Lv.25」を達成したあと、転生でレベルが0に戻るケース
+  const s = stateWith(
+    { sun: 25 },
+    { totalEarned: MEGUMI_DIVISOR, lifetimeEarned: MEGUMI_DIVISOR },
+  );
+  const achieved = checkAchievements(s).state;
+  assert.equal(isAchieved(achieved, 'sun-25'), true);
+
+  const after = prestige(achieved, T0 + 1_000).state;
+
+  assert.equal(after.levels.sun, 0, '条件はもう満たしていない');
+  assert.equal(isAchieved(after, 'sun-25'), true, '取ったはずの実績が消えている');
+});
+
+test('実績は生産量に倍率をかける', () => {
+  const none = stateWith({ sun: 10 });
+  const three = stateWith({ sun: 10 }, { achievements: ['first-drop', 'sprouted', 'all-kinds'] });
+
+  assert.equal(num(achievementMultiplier(none)), 1);
+  assert.equal(num(achievementMultiplier(three)), 1 + 3 * ACHIEVEMENT_BONUS);
+  assert.equal(num(productionPerSecond(three)), 1 * (1 + 3 * ACHIEVEMENT_BONUS));
+});
+
+test('advanceTo のなかで実績が判定される', () => {
+  const s = stateWith({ sun: 10 }); // 1.0/s
+  const result = advanceTo(s, T0 + 300_000); // 5分ぶん（効率0.5で150ひかり）
+
+  // ひかりを集めた結果、「はじめの ひとしずく」と「めが でた」が同時に達成される
+  const ids = result.newlyEarned.map((a) => a.id);
+  assert.ok(ids.includes('first-drop'));
+  assert.ok(ids.includes('sprouted'));
+  assert.equal(isAchieved(result.state, 'first-drop'), true);
+});
+
+test('自動購入の結果も同じtickで実績に反映される', () => {
+  // 4種類そろえる実績は、自動購入で最後の1種類を買った瞬間に達成されてほしい
+  const s = stateWith(
+    { sun: 1, water: 1, soil: 1 },
+    {
+      light: 100_000,
+      lifetimeEarned: 100_000,
+      megumiLevels: { sprout: 0, sleep: 0, palm: 0, auto: 4 },
+    },
+  );
+  const result = advanceTo(s, T0 + 1_000);
+
+  assert.ok(result.state.levels.wind >= 1, '自動購入でかぜを買っている');
+  assert.equal(isAchieved(result.state, 'all-kinds'), true, '1tick遅れて達成されている');
+});
+
+test('長く放置した記録が残り、実績になる', () => {
+  const s = stateWith({ sun: 10 });
+  const result = advanceTo(s, T0 + OFFLINE_CAP_MS + 60_000); // 上限を超えて放置
+
+  assert.equal(result.state.longestOfflineMs, OFFLINE_CAP_MS);
+  assert.equal(isAchieved(result.state, 'deep-sleep'), true);
+});
+
+test('短い離席では放置の記録が上書きされない', () => {
+  const s = stateWith({ sun: 10 }, { longestOfflineMs: OFFLINE_CAP_MS });
+  const result = advanceTo(s, T0 + 5_000); // オンライン扱い
+
+  assert.equal(result.state.longestOfflineMs, OFFLINE_CAP_MS, '記録が縮んでいる');
+});
+
+test('桁が爆発したときの実績も判定できる', () => {
+  const s = stateWith({}, { lifetimeEarned: big({ m: 1, e: 25 }) });
+  const { state } = checkAchievements(s);
+
+  assert.equal(isAchieved(state, 'astronomical'), true);
+  assert.equal(isAchieved(state, 'millionaire'), true, '下位の実績もまとめて達成される');
+});
+
+// --- アンロック（段階的な開放） ---
+
+test('最初のアップグレードは常に見える', () => {
+  const fresh = createInitialState(T0);
+
+  assert.equal(isUpgradeUnlocked(fresh, 'sun'), true, '店が空だと何をする画面か分からない');
+  assert.deepEqual(unlockedUpgrades(fresh).map((u) => u.id), ['sun']);
+});
+
+test('累計が基本コストの半分に届くと店頭に並ぶ', () => {
+  const waterDef = UPGRADES.find((u) => u.id === 'water');
+  const threshold = waterDef.baseCost * UPGRADE_UNLOCK_RATIO;
+
+  const before = stateWith({}, { lifetimeEarned: threshold - 1 });
+  const after = stateWith({}, { lifetimeEarned: threshold });
+
+  assert.equal(isUpgradeUnlocked(before, 'water'), false);
+  assert.equal(isUpgradeUnlocked(after, 'water'), true);
+});
+
+test('一度開いたものは、使い切っても閉じない', () => {
+  // 判定に使うのは全周回の累計なので、所持量が0でも並んだまま
+  const spent = stateWith({}, { light: 0, totalEarned: 0, lifetimeEarned: 1_000_000 });
+
+  assert.equal(unlockedUpgrades(spent).length, UPGRADES.length);
+});
+
+test('転生パネルは到達が近づいてから出る', () => {
+  const early = stateWith({}, { lifetimeEarned: 100 });
+  const close = stateWith({}, { lifetimeEarned: MEGUMI_DIVISOR * 0.1 });
+
+  assert.equal(isPrestigeUnlocked(early), false);
+  assert.equal(isPrestigeUnlocked(close), true);
+});
+
+test('転生したあとは、たとえ累計が少なくても転生パネルが出たまま', () => {
+  const veteran = stateWith({}, { lifetimeEarned: 0, prestigeCount: 1 });
+  assert.equal(isPrestigeUnlocked(veteran), true);
+});
+
+test('めぐみショップは初回の転生後に出る', () => {
+  assert.equal(isMegumiShopUnlocked(createInitialState(T0)), false);
+  assert.equal(isMegumiShopUnlocked(stateWith({}, { prestigeCount: 1 })), true);
+});
+
 // --- 数値のインフレ耐性 ---
 
 test('周回を重ねて桁が爆発しても計算が壊れない', () => {
@@ -635,7 +799,7 @@ test('セーブデータの一部が欠けても読める範囲は生かす', ()
   assert.equal(num(restored.megumi), 0);
 });
 
-test('v1のセーブはv3まで一気に移行され、進行が失われない', () => {
+test('v1のセーブは最新まで一気に移行され、進行が失われない', () => {
   const v1Save = JSON.stringify({
     version: 1,
     light: 500,
@@ -645,12 +809,48 @@ test('v1のセーブはv3まで一気に移行され、進行が失われない'
   });
   const restored = deserialize(v1Save, T0);
 
-  assert.equal(restored.version, 3);
+  assert.equal(restored.version, SCHEMA_VERSION);
   assert.equal(num(restored.light), 500, '所持量が消えていない');
   assert.equal(restored.levels.sun, 7, 'アップグレードが消えていない');
   assert.equal(num(restored.megumi), 0, '転生はまだ0回');
   assert.equal(num(restored.lifetimeEarned), 12_345, 'これまでの累計を引き継ぐ');
   assert.deepEqual(restored.megumiLevels, { sprout: 0, sleep: 0, palm: 0, auto: 0 });
+});
+
+test('v3のセーブは実績が空の状態で移行され、次のtickでまとめて達成される', () => {
+  const v3Save = JSON.stringify({
+    version: 3,
+    light: { m: 5, e: 5 },
+    totalEarned: { m: 5, e: 5 },
+    lifetimeEarned: { m: 5, e: 5 },
+    levels: { sun: 30, water: 3, soil: 1, wind: 1 },
+    lastSeenAt: T0,
+    megumi: { m: 3, e: 0 },
+    megumiEarned: { m: 3, e: 0 },
+    megumiLevels: { sprout: 0, sleep: 0, palm: 0, auto: 0 },
+    prestigeCount: 2,
+  });
+  const restored = deserialize(v3Save, T0);
+
+  assert.equal(restored.version, 4);
+  assert.deepEqual(restored.achievements, [], '移行の時点では空');
+  assert.equal(restored.longestOfflineMs, 0);
+
+  // これまでの進行が無視されないことの確認
+  const { state } = checkAchievements(restored);
+  assert.equal(isAchieved(state, 'sun-25'), true);
+  assert.equal(isAchieved(state, 'first-prestige'), true);
+  assert.equal(isAchieved(state, 'all-kinds'), true);
+});
+
+test('知らない実績IDが混ざっていても無視する', () => {
+  const save = JSON.stringify({
+    ...JSON.parse(serialize(createInitialState(T0))),
+    achievements: ['first-drop', 'この実績はもう存在しない'],
+  });
+  const restored = deserialize(save, T0);
+
+  assert.deepEqual(restored.achievements, ['first-drop']);
 });
 
 test('v2のセーブは数値がBigに変換される', () => {
@@ -666,7 +866,7 @@ test('v2のセーブは数値がBigに変換される', () => {
   });
   const restored = deserialize(v2Save, T0);
 
-  assert.equal(restored.version, 3);
+  assert.equal(restored.version, SCHEMA_VERSION);
   assert.equal(num(restored.light), 1_500);
   assert.equal(num(restored.megumi), 3);
   assert.equal(num(restored.megumiEarned), 3, '使った記録がないので持っている数を累計とみなす');

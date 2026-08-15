@@ -26,7 +26,7 @@ import {
 } from './bignum.js';
 
 /** セーブデータの形式バージョン。形を変えたら上げて、読み込み側で移行する。 */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 // --- チューニング定数（マジックナンバーは全部ここに集約する） ---
 
@@ -56,6 +56,21 @@ export const MEGUMI_DIVISOR = 100_000;
 
 /** 累計めぐみ1個あたりの生産量ボーナス（+10%） */
 export const MEGUMI_BONUS = 0.1;
+
+// --- 実績とアンロック ---
+
+/** 実績1つあたりの生産量ボーナス（+2%）。集める理由をつくるための、ささやかな報酬 */
+export const ACHIEVEMENT_BONUS = 0.02;
+
+/**
+ * アップグレードが店頭に並ぶ条件。基本コストのこの割合まで稼いだら出現する。
+ * 最初から4種類すべて並べると、買えないものばかりで選択肢が多く見えてしまう。
+ * 手が届くものだけを見せるほうが、次に何をすればいいかが伝わる。
+ */
+export const UPGRADE_UNLOCK_RATIO = 0.5;
+
+/** 転生パネルが出現する条件（めぐみ1個ぶんのこの割合まで稼いだら） */
+export const PRESTIGE_UNLOCK_RATIO = 0.1;
 
 /**
  * 育成段階。totalEarned（累計で稼いだひかり）がしきい値を超えると進化する。
@@ -159,6 +174,108 @@ export const MEGUMI_UPGRADES = [
   },
 ];
 
+/**
+ * 実績。condition が一度でも真になったら永久に記録される（あとで偽に戻っても外れない）。
+ *
+ * 放置ゲーの離脱は「次にやることが見えなくなった瞬間」に起きる。
+ * 実績はそれを防ぐための、短期の目標を配り続ける装置。
+ * だから達成の軸をわざとばらけさせている（累計・育成・周回・自動化・放置）。
+ * すべてが「たくさん稼ぐ」だと、結局ひとつの目標しか存在しないのと同じになる。
+ */
+export const ACHIEVEMENTS = [
+  {
+    id: 'first-drop',
+    name: 'はじめの ひとしずく',
+    emoji: '💧',
+    describe: () => 'はじめて ひかりを あつめる',
+    condition: (state) => gte(state.lifetimeEarned, 1),
+  },
+  {
+    id: 'sprouted',
+    name: 'めが でた',
+    emoji: '🌱',
+    describe: () => 'ふたばまで そだてる',
+    condition: (state) => stageIndex(state) >= 1,
+  },
+  {
+    id: 'all-kinds',
+    name: 'よんしゅるい そろえた',
+    emoji: '🧺',
+    describe: () => 'すべての アップグレードを 1つ いじょう もつ',
+    condition: (state) => UPGRADES.every((u) => (state.levels[u.id] ?? 0) >= 1),
+  },
+  {
+    id: 'sun-25',
+    name: 'たいようの めぐみ',
+    emoji: '☀️',
+    describe: () => 'おひさまを Lv.25 まで あげる',
+    condition: (state) => (state.levels.sun ?? 0) >= 25,
+  },
+  {
+    id: 'world-tree',
+    name: 'せかいじゅ',
+    emoji: '🎄',
+    describe: () => 'さいごの すがたまで そだてる',
+    condition: (state) => stageIndex(state) >= STAGES.length - 1,
+  },
+  {
+    id: 'millionaire',
+    name: 'ひゃくまんの ひかり',
+    emoji: '✨',
+    describe: () => 'つうさんで 100万 ひかりを あつめる',
+    condition: (state) => gte(state.lifetimeEarned, 1_000_000),
+  },
+  {
+    id: 'first-prestige',
+    name: 'はじめての てんせい',
+    emoji: '🔄',
+    describe: () => '1かい てんせいする',
+    condition: (state) => state.prestigeCount >= 1,
+  },
+  {
+    id: 'prestige-5',
+    name: 'ごしゅうめ',
+    emoji: '🌀',
+    describe: () => '5かい てんせいする',
+    condition: (state) => state.prestigeCount >= 5,
+  },
+  {
+    id: 'megumi-10',
+    name: 'めぐみ あつめ',
+    emoji: '🍀',
+    describe: () => 'めぐみを つうさん 10こ あつめる',
+    condition: (state) => gte(state.megumiEarned, 10),
+  },
+  {
+    id: 'automated',
+    name: 'てを はなす',
+    emoji: '⚙️',
+    describe: () => 'じどうのてを 1つ かう',
+    condition: (state) => (state.megumiLevels?.auto ?? 0) >= 1,
+  },
+  {
+    id: 'full-auto',
+    name: 'ぜんぶ じどう',
+    emoji: '🤖',
+    describe: () => 'すべてを じどうで かえるようにする',
+    condition: (state) => (state.megumiLevels?.auto ?? 0) >= UPGRADES.length,
+  },
+  {
+    id: 'deep-sleep',
+    name: 'ぐっすり',
+    emoji: '🌙',
+    describe: () => 'オフラインの じょうげんまで はなれる',
+    condition: (state) => (state.longestOfflineMs ?? 0) >= OFFLINE_CAP_MS,
+  },
+  {
+    id: 'astronomical',
+    name: 'けたちがい',
+    emoji: '🌌',
+    describe: () => 'つうさんで 1垓（10の20じょう）ひかりを あつめる',
+    condition: (state) => state.lifetimeEarned.e >= 20,
+  },
+];
+
 /** id からアップグレード定義を引く。見つからなければ undefined */
 export function findUpgrade(id) {
   return UPGRADES.find((u) => u.id === id);
@@ -181,6 +298,8 @@ export function createInitialState(now) {
     megumiLevels: Object.fromEntries(MEGUMI_UPGRADES.map((u) => [u.id, 0])),
     prestigeCount: 0, // 転生した回数
     lifetimeEarned: ZERO, // 全周回を通じた累計。転生しても減らない（実績や統計のため）
+    achievements: [], // 達成した実績のID。転生しても消えない
+    longestOfflineMs: 0, // いちばん長く離れていた時間。実績の判定に使う
   };
 }
 
@@ -264,6 +383,75 @@ export function megumiMultiplier(state) {
   return add(ONE, mul(state.megumiEarned, MEGUMI_BONUS));
 }
 
+// --- 実績 ---
+
+export function isAchieved(state, id) {
+  return (state.achievements ?? []).includes(id);
+}
+
+export function achievementCount(state) {
+  return (state.achievements ?? []).length;
+}
+
+/** 実績による永続倍率。集めるほど少しずつ速くなる */
+export function achievementMultiplier(state) {
+  return add(ONE, mul(achievementCount(state), ACHIEVEMENT_BONUS));
+}
+
+/**
+ * 達成した実績を記録する。
+ *
+ * 一度達成したものは、条件が偽に戻っても外さない（買い物で所持量が減った、
+ * 転生でレベルが戻った、など）。ここを毎回評価し直す作りにすると
+ * 「取ったはずの実績が消える」という、いちばんやってはいけない体験になる。
+ *
+ * @returns {{state:object, newlyEarned:Array}} 何も増えなければ state はそのまま返す
+ */
+export function checkAchievements(state) {
+  const newlyEarned = ACHIEVEMENTS.filter(
+    (achievement) => !isAchieved(state, achievement.id) && achievement.condition(state),
+  );
+  if (newlyEarned.length === 0) return { state, newlyEarned };
+
+  return {
+    state: {
+      ...state,
+      achievements: [...(state.achievements ?? []), ...newlyEarned.map((a) => a.id)],
+    },
+    newlyEarned,
+  };
+}
+
+// --- アンロック（段階的な開放） ---
+
+/**
+ * このアップグレードを店頭に出すか。
+ * 手が届かないものを並べておくより、届きそうなものだけ見せるほうが
+ * 「次に何をすればいいか」が伝わる。判定に使うのは全周回の累計なので、
+ * 一度開放されたものが閉じることはない。
+ */
+export function isUpgradeUnlocked(state, id) {
+  const index = UPGRADES.findIndex((u) => u.id === id);
+  if (index < 0) return false;
+  if (index === 0) return true; // 最初の1つは常に見せる（店が空だと何をする画面か分からない）
+  return gte(state.lifetimeEarned, UPGRADES[index].baseCost * UPGRADE_UNLOCK_RATIO);
+}
+
+export function unlockedUpgrades(state) {
+  return UPGRADES.filter((u) => isUpgradeUnlocked(state, u.id));
+}
+
+/** 転生パネルを出すか。初回の到達が視野に入ってから見せる */
+export function isPrestigeUnlocked(state) {
+  if (state.prestigeCount > 0) return true;
+  return gte(state.lifetimeEarned, MEGUMI_DIVISOR * PRESTIGE_UNLOCK_RATIO);
+}
+
+/** めぐみショップを出すか。めぐみを持っていない段階で見せても意味がない */
+export function isMegumiShopUnlocked(state) {
+  return state.prestigeCount > 0;
+}
+
 /**
  * 毎秒の生産量。
  * アップグレードの合計に、2つの倍率（今回の育成段階 × 永続のめぐみ）を掛ける。
@@ -276,7 +464,10 @@ export function productionPerSecond(state) {
     ZERO,
   );
   const stageMultiplier = 1 + stageIndex(state) * STAGE_BONUS_PER_LEVEL;
-  return mul(mul(base, stageMultiplier), megumiMultiplier(state));
+  return mul(
+    mul(mul(base, stageMultiplier), megumiMultiplier(state)),
+    achievementMultiplier(state),
+  );
 }
 
 /**
@@ -322,6 +513,7 @@ export function advanceTo(state, now) {
       offline: false,
       cappedMs: 0,
       purchases: 0,
+      newlyEarned: [],
     };
   }
 
@@ -338,13 +530,23 @@ export function advanceTo(state, now) {
   // （本来は途中で買った分がさらに稼いでいるため）。そこは割り切っている
   const automated = runAutoBuyer(result.state);
 
+  // 実績の判定は最後。自動購入まで済ませた状態で見ないと
+  // 「4種類そろえた」のような条件が1tick遅れて達成されてしまう
+  const achieved = checkAchievements({
+    ...automated.state,
+    longestOfflineMs: offline
+      ? Math.max(state.longestOfflineMs ?? 0, elapsedMs)
+      : (state.longestOfflineMs ?? 0),
+  });
+
   return {
-    state: { ...automated.state, lastSeenAt: now },
+    state: { ...achieved.state, lastSeenAt: now },
     gained: result.gained,
     elapsedMs,
     offline,
     cappedMs: rawElapsed - elapsedMs,
     purchases: automated.purchases,
+    newlyEarned: achieved.newlyEarned,
   };
 }
 
@@ -499,6 +701,9 @@ export function prestige(state, now) {
       megumiLevels: { ...state.megumiLevels },
       prestigeCount: state.prestigeCount + 1,
       lifetimeEarned: state.lifetimeEarned,
+      // 実績と記録は周回をまたいで残す。ここを消すと集める意味がなくなる
+      achievements: [...(state.achievements ?? [])],
+      longestOfflineMs: state.longestOfflineMs ?? 0,
     },
     ok: true,
     gained,
@@ -539,6 +744,16 @@ const MIGRATIONS = {
     // 使った記録がないので、持っている数＝これまでに稼いだ数とみなす
     megumiEarned: big(data.megumi),
     megumiLevels: Object.fromEntries(MEGUMI_UPGRADES.map((u) => [u.id, 0])),
+  }),
+
+  // v3 → v4: 実績を追加した。
+  // 既存プレイヤーの実績は空から始まるが、次のtickで条件を満たすものは
+  // まとめて達成扱いになるので、これまでの進行が無視されることはない
+  3: (data) => ({
+    ...data,
+    version: 4,
+    achievements: [],
+    longestOfflineMs: 0,
   }),
 };
 
@@ -603,5 +818,10 @@ export function deserialize(text, now) {
       MEGUMI_UPGRADES.map((u) => [u.id, level(migrated.megumiLevels?.[u.id])]),
     ),
     prestigeCount: level(migrated.prestigeCount),
+    // 知らないIDが混ざっていても無視する（定義を消したあとのセーブでも落ちないように）
+    achievements: ACHIEVEMENTS.map((a) => a.id).filter((id) =>
+      Array.isArray(migrated.achievements) ? migrated.achievements.includes(id) : false,
+    ),
+    longestOfflineMs: level(migrated.longestOfflineMs),
   };
 }

@@ -20,6 +20,15 @@
         box-sizing: border-box;
       }
 
+      /*
+        hidden 属性を確実に効かせる。
+        ブラウザ標準の [hidden] は display:none だが、あとから書いた
+        display:flex / grid のほうが強いので、指定した要素では効かなくなる。
+      */
+      [hidden] {
+        display: none !important;
+      }
+
       body {
         margin: 0;
         padding: 24px 16px 48px;
@@ -331,6 +340,72 @@
         color: #a08a5e;
       }
 
+      /* --- 実績 --- */
+      .achievements-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 14px;
+      }
+
+      .achievements-title {
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+      }
+
+      #achievement-count {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+
+      #achievement-list {
+        display: grid;
+        gap: 6px;
+      }
+
+      .achievement {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: var(--panel-hi);
+      }
+
+      /* 未達成のものも条件つきで見せる。隠すと「次の目標」として機能しない */
+      .achievement.locked {
+        background: none;
+        opacity: 0.45;
+      }
+
+      .achievement-emoji {
+        font-size: 20px;
+        width: 24px;
+        text-align: center;
+      }
+
+      .achievement.locked .achievement-emoji {
+        filter: grayscale(1);
+      }
+
+      .achievement-body {
+        display: grid;
+        gap: 1px;
+      }
+
+      .achievement-name {
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .achievement-desc {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
       /* --- おかえりなさいの通知 --- */
       #toast {
         position: fixed;
@@ -396,7 +471,7 @@
 
       <section id="shop"></section>
 
-      <section class="panel prestige">
+      <section class="panel prestige" id="prestige-panel" hidden>
         <div class="prestige-head">
           <span class="prestige-title">めぐみ</span>
           <span id="run-count"></span>
@@ -409,8 +484,16 @@
         <button id="prestige-button"></button>
         <span id="prestige-note"></span>
 
-        <div class="megumi-shop-label">めぐみの つかいみち</div>
+        <div class="megumi-shop-label" id="megumi-shop-label" hidden>めぐみの つかいみち</div>
         <div id="megumi-shop"></div>
+      </section>
+
+      <section class="panel achievements">
+        <div class="achievements-head">
+          <span class="achievements-title">できたこと</span>
+          <span id="achievement-count"></span>
+        </div>
+        <div id="achievement-list"></div>
       </section>
 
       <footer>
