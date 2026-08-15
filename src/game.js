@@ -27,7 +27,7 @@ import {
 } from './bignum.js';
 
 /** セーブデータの形式バージョン。形を変えたら上げて、読み込み側で移行する。 */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // --- チューニング定数（マジックナンバーは全部ここに集約する） ---
 
@@ -92,8 +92,12 @@ export const BOOST_DURATION_MS = 30 * 1000; // ブーストの持続時間
 const LEAF_MAX_SPAWNS_PER_ADVANCE = 500;
 
 /**
- * 育成段階。totalEarned（累計で稼いだひかり）がしきい値を超えると進化する。
+ * 育成段階の基準となるしきい値。totalEarned（その周で稼いだ累計）と比べて進化する。
  * 「所持量」ではなく「累計」で判定するのが重要。所持量だと買い物した瞬間に退化してしまう。
+ *
+ * ただしこの値をそのまま使うのは1周目だけ。2周目以降は前の周の到達量に合わせて
+ * 引き伸ばす（stageScale を参照）。固定値のままだと、めぐみ倍率が伸びた終盤で
+ * 全段階を数十秒で駆け抜けてしまい、育成そのものが機能しなくなるため。
  */
 export const STAGES = [
   { name: 'たね', emoji: '🌰', threshold: 0 },
@@ -357,6 +361,7 @@ export function createInitialState(now) {
     lifetimeEarned: ZERO, // 全周回を通じた累計。転生しても減らない（実績や統計のため）
     achievements: [], // 達成した実績のID。転生しても消えない
     longestOfflineMs: 0, // いちばん長く離れていた時間。実績の判定に使う
+    lastRunTotal: ZERO, // これまでの1周でいちばん稼いだ量。育成段階のしきい値の基準になる
     rngSeed: firstLeaf.seed,
     nextLeafAt: firstLeaf.at, // 次にはっぱが出る時刻
     leafExpiresAt: 0, // いま出ているはっぱが消える時刻（0なら出ていない）
@@ -365,11 +370,34 @@ export function createInitialState(now) {
   };
 }
 
+/**
+ * 育成段階のしきい値にかける倍率。
+ *
+ * 前の周でどこまで稼いだかを基準に伸びる。1周目は前の周がないので1倍で、
+ * 新規プレイヤーの体験は変わらない。
+ *
+ * これがないと、めぐみ倍率だけが際限なく伸びて、しきい値が固定のまま取り残される。
+ * その結果、終盤は全段階を数十秒で駆け抜けるだけの飾りになってしまう
+ * （実際にシミュレータで検出した問題）。
+ *
+ * 前の周の記録は下げない（max を取る）ので、木の手ごたえは自分の最高記録に追随する。
+ */
+export function stageScale(state) {
+  const finalThreshold = STAGES[STAGES.length - 1].threshold;
+  return max(ONE, div(state.lastRunTotal ?? ZERO, finalThreshold));
+}
+
+/** いまの周における、指定した段階のしきい値 */
+export function stageThreshold(state, index) {
+  return mul(STAGES[index].threshold, stageScale(state));
+}
+
 /** 現在の育成段階のインデックスを返す */
 export function stageIndex(state) {
+  const scale = stageScale(state); // 段ごとに計算し直さないよう、先に1回だけ求める
   let index = 0;
   for (let i = 0; i < STAGES.length; i++) {
-    if (gte(state.totalEarned, STAGES[i].threshold)) index = i;
+    if (gte(state.totalEarned, mul(STAGES[i].threshold, scale))) index = i;
   }
   return index;
 }
@@ -915,6 +943,9 @@ export function prestige(state, now) {
       // 実績と記録は周回をまたいで残す。ここを消すと集める意味がなくなる
       achievements: [...(state.achievements ?? [])],
       longestOfflineMs: state.longestOfflineMs ?? 0,
+      // 次の周の木は、この周の到達量が基準になる。
+      // 記録は下げないので、早めに転生しても手ごたえが緩まない
+      lastRunTotal: max(state.lastRunTotal ?? ZERO, state.totalEarned),
       // はっぱは実時間の仕組みなので、周回とは無関係に進み続ける
       rngSeed: state.rngSeed,
       nextLeafAt: state.nextLeafAt,
@@ -984,6 +1015,14 @@ const MIGRATIONS = {
     leafExpiresAt: 0,
     boostUntil: 0,
     leavesCollected: 0,
+  }),
+
+  // v5 → v6: 育成段階のしきい値を、前の周の到達量に合わせて伸ばすようにした。
+  // 0 にしておけば倍率1（＝これまでどおり）から始まり、次の転生で基準が入る
+  5: (data) => ({
+    ...data,
+    version: 6,
+    lastRunTotal: ZERO,
   }),
 };
 
@@ -1058,5 +1097,6 @@ export function deserialize(text, now) {
     leafExpiresAt: level(migrated.leafExpiresAt),
     boostUntil: level(migrated.boostUntil),
     leavesCollected: level(migrated.leavesCollected),
+    lastRunTotal: bigField(migrated.lastRunTotal),
   };
 }

@@ -145,6 +145,7 @@ export function simulate({
   let runStartedAt = STARTED_AT;
   let leavesSeen = 0;
   let reachedStage = -1;
+  const runLengths = []; // 1周にかかった時間。段階の到達時刻を評価する物差しになる
 
   for (let now = STARTED_AT + stepMs; now <= endAt; now += stepMs) {
     // 生産量ゼロのあいだは手動で水をやる（実際のプレイヤーの序盤と同じ）
@@ -189,6 +190,7 @@ export function simulate({
         milestones.lastRunStages = currentRunStages;
         currentRunStages = {};
         reachedStage = -1;
+        runLengths.push(now - runStartedAt);
         runStartedAt = now;
       }
     }
@@ -206,6 +208,12 @@ export function simulate({
       finalRate: productionPerSecond(state),
       achievements: `${achievementCount(state)} / ${ACHIEVEMENTS.length}`,
       leavesCollected: leavesSeen,
+      // 段階の到達時刻は「周の長さ」と並べて初めて意味が読める
+      firstRunLength: runLengths[0],
+      lastRunLength: runLengths[runLengths.length - 1],
+      medianRunLength: runLengths.length
+        ? [...runLengths].sort((a, b) => a - b)[Math.floor(runLengths.length / 2)]
+        : undefined,
     },
   };
 }
@@ -239,6 +247,11 @@ function printReport(options) {
     const show = (at) => (at === undefined ? '未到達' : formatDuration(at)).padEnd(10, ' ');
     console.log(`  ${stage.emoji} ${stage.name.padEnd(6, '　')} ${show(first)} ${show(last)}`);
   }
+
+  console.log('\n■ 1周にかかる時間');
+  console.log(`  1周目            ${formatDuration(summary.firstRunLength)}`);
+  console.log(`  中央値           ${formatDuration(summary.medianRunLength)}`);
+  console.log(`  直近の周         ${formatDuration(summary.lastRunLength)}`);
 
   console.log('\n■ 節目');
   console.log(`  はじめての転生   ${milestones.firstPrestige === null ? '未到達' : formatDuration(milestones.firstPrestige)}`);

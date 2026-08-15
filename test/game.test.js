@@ -49,6 +49,9 @@ import {
   migrate,
   createInitialState,
   stageIndex,
+  stageScale,
+  stageThreshold,
+  STAGES,
   currentStage,
   upgradeCost,
   currentCost,
@@ -79,7 +82,14 @@ const num = (value) => toNumber(value);
 /** Big を扱う項目は自動で変換しつつ、指定レベルのアップグレードを持った状態をつくる */
 function stateWith(levels, extra = {}) {
   const base = createInitialState(T0);
-  const bigFields = ['light', 'totalEarned', 'lifetimeEarned', 'megumi', 'megumiEarned'];
+  const bigFields = [
+    'light',
+    'totalEarned',
+    'lifetimeEarned',
+    'megumi',
+    'megumiEarned',
+    'lastRunTotal',
+  ];
   const converted = Object.fromEntries(
     Object.entries(extra).map(([key, value]) => [
       key,
@@ -112,6 +122,85 @@ test('育成段階が上がると生産量に倍率がかかる', () => {
     num(productionPerSecond(sprout)),
     num(productionPerSecond(seed)) * (1 + STAGE_BONUS_PER_LEVEL),
   );
+});
+
+// --- 育成段階のしきい値が周ごとに伸びる ---
+
+test('1周目のしきい値は基準値のまま', () => {
+  const fresh = createInitialState(T0);
+
+  assert.equal(num(stageScale(fresh)), 1, '新規プレイヤーの体験を変えてはいけない');
+  for (let i = 0; i < STAGES.length; i++) {
+    assert.equal(num(stageThreshold(fresh, i)), STAGES[i].threshold);
+  }
+});
+
+test('前の周の到達量に合わせてしきい値が伸びる', () => {
+  const finalThreshold = STAGES[STAGES.length - 1].threshold;
+  // 前の周で最終段階の1000倍まで稼いだ状態
+  const veteran = stateWith({}, { lastRunTotal: finalThreshold * 1_000 });
+
+  assert.equal(num(stageScale(veteran)), 1_000);
+  assert.equal(num(stageThreshold(veteran, 1)), STAGES[1].threshold * 1_000);
+});
+
+test('しきい値が伸びるので、終盤でも段階が一瞬で飛ばない', () => {
+  const finalThreshold = STAGES[STAGES.length - 1].threshold;
+  const scaled = stateWith(
+    {},
+    { lastRunTotal: finalThreshold * 1_000, totalEarned: finalThreshold * 10 },
+  );
+
+  // しきい値が固定なら、この累計はとっくに最終段階に届いている
+  assert.equal(currentStage({ ...scaled, lastRunTotal: ZERO }).name, 'せかいじゅ');
+  // 伸ばしたあとは、まだ途中の段階にいる
+  assert.ok(stageIndex(scaled) < STAGES.length - 1, '段階が飛んでしまっている');
+});
+
+test('転生すると、その周の到達量が次のしきい値の基準になる', () => {
+  const s = stateWith({}, { totalEarned: MEGUMI_DIVISOR * 100 });
+  const { state } = prestige(s, T0 + 1_000);
+
+  assert.equal(num(state.lastRunTotal), MEGUMI_DIVISOR * 100);
+  assert.ok(num(stageScale(state)) > 1);
+});
+
+test('早めに転生しても基準は下がらない', () => {
+  // 記録が下がると木の手ごたえが緩んでしまうので、最高記録を保つ
+  const s = stateWith(
+    {},
+    { totalEarned: MEGUMI_DIVISOR, lastRunTotal: MEGUMI_DIVISOR * 1_000 },
+  );
+  const { state } = prestige(s, T0 + 1_000);
+
+  assert.equal(num(state.lastRunTotal), MEGUMI_DIVISOR * 1_000);
+});
+
+test('v5のセーブは倍率1から始まる', () => {
+  const v5Save = JSON.stringify({
+    version: 5,
+    light: { m: 1, e: 2 },
+    totalEarned: { m: 1, e: 2 },
+    lifetimeEarned: { m: 1, e: 2 },
+    levels: { sun: 5, water: 0, soil: 0, wind: 0 },
+    lastSeenAt: T0,
+    megumi: { m: 0, e: 0 },
+    megumiEarned: { m: 0, e: 0 },
+    megumiLevels: { sprout: 0, sleep: 0, palm: 0, auto: 0 },
+    prestigeCount: 3,
+    achievements: [],
+    longestOfflineMs: 0,
+    rngSeed: 1,
+    nextLeafAt: 0,
+    leafExpiresAt: 0,
+    boostUntil: 0,
+    leavesCollected: 0,
+  });
+  const restored = deserialize(v5Save, T0);
+
+  assert.equal(restored.version, SCHEMA_VERSION);
+  assert.equal(num(restored.lastRunTotal), 0);
+  assert.equal(num(stageScale(restored)), 1, '既存プレイヤーが急に進化しなくなってはいけない');
 });
 
 test('進化の判定は所持量ではなく累計で行う（買い物しても退化しない）', () => {

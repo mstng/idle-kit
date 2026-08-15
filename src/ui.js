@@ -1,13 +1,13 @@
 // UI層。ここは「ゲームループ・保存・描画」の3つだけを担当し、ゲームのルールは一切書かない。
 // ルールはすべて game.js（純粋関数）側にあるので、UIを作り替えてもゲームは壊れない。
 
-import { ONE, add, lt, mul, toNumber } from './bignum.js';
+import { ZERO, ONE, add, div, lt, max, mul, sub, toNumber } from './bignum.js';
 import { formatNumber, formatCount, formatDuration } from './format.js';
 import {
   UPGRADES,
   MEGUMI_UPGRADES,
   ACHIEVEMENTS,
-  STAGES,
+  stageThreshold,
   isAchieved,
   achievementCount,
   achievementMultiplier,
@@ -207,15 +207,16 @@ function render() {
   el.leaf.hidden = !isLeafAvailable(state, now);
   el.waterButton.textContent = `みずをやる (+${formatCount(manualGain(state))})`;
 
-  // 次の進化までの進捗。最終段階に達していたら満タン表示にする
+  // 次の進化までの進捗。しきい値は周ごとに伸びるので、必ずスケール後の値で計算する
   if (next) {
-    const from = STAGES[stageIndex(state)].threshold;
-    const span = next.threshold - from;
-    const ratio = (toNumber(state.totalEarned) - from) / span;
+    const index = stageIndex(state);
+    const from = stageThreshold(state, index);
+    const to = stageThreshold(state, index + 1);
+    const ratio = toNumber(div(sub(state.totalEarned, from), sub(to, from)));
+    const remaining = max(ZERO, sub(to, state.totalEarned));
+
     el.progressBar.style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
-    el.progressLabel.textContent = `${next.emoji} ${next.name} まで あと ${formatNumber(
-      Math.max(0, next.threshold - toNumber(state.totalEarned)),
-    )}`;
+    el.progressLabel.textContent = `${next.emoji} ${next.name} まで あと ${formatNumber(remaining)}`;
   } else {
     el.progressBar.style.width = '100%';
     el.progressLabel.textContent = 'さいだいまで そだちました';
